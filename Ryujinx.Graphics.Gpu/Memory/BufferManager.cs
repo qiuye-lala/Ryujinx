@@ -549,7 +549,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
                 if (bounds.Address != 0)
                 {
-                    sRanges[bindingInfo.Binding] = GetBufferRange(bounds.Address, bounds.Size);
+                    sRanges[bindingInfo.Binding] = GetBufferRange(bounds.Address);
                 }
             }
 
@@ -722,7 +722,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
                     if (bounds.Address != 0)
                     {
-                        ranges[bindingInfo.Binding] = GetBufferRange(bounds.Address, bounds.Size);
+                        ranges[bindingInfo.Binding] = isStorage
+                            ? GetBufferRange(bounds.Address)
+                            : GetBufferRange(bounds.Address, bounds.Size);
                     }
                 }
             }
@@ -819,6 +821,16 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 (int)size);
 
             dstBuffer.Flush(dstAddress, size);
+        }
+
+        /// <summary>
+        /// Gets a buffer sub-range starting at a given memory address.
+        /// </summary>
+        /// <param name="address">Start address of the memory range</param>
+        /// <returns>The buffer sub-range starting at rhe given memory address</returns>
+        private BufferRange GetBufferRange(ulong address)
+        {
+            return GetBuffer(address, 1).GetRange(address);
         }
 
         /// <summary>
