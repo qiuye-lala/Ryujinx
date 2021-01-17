@@ -1,9 +1,11 @@
+using Ryujinx.Graphics.Gpu.Shader.Cache.Definition;
+
 namespace Ryujinx.Graphics.Gpu.Image
 {
     /// <summary>
     /// Maxwell texture descriptor, as stored on the GPU texture pool memory region.
     /// </summary>
-    struct TextureDescriptor
+    struct TextureDescriptor : ITextureDescriptor
     {
 #pragma warning disable CS0649
         public uint Word0;
@@ -226,6 +228,25 @@ namespace Ryujinx.Graphics.Gpu.Image
         public TextureMsaaMode UnpackTextureMsaaMode()
         {
             return (TextureMsaaMode)((Word7 >> 8) & 0xf);
+        }
+
+        /// <summary>
+        /// Create the equivalent of this TextureDescriptor for the shader cache.
+        /// </summary>
+        /// <returns>The equivalent of this TextureDescriptor for the shader cache.</returns>
+        public GuestTextureDescriptor ToCache()
+        {
+            GuestTextureDescriptor result = new GuestTextureDescriptor
+            {
+                Handle = uint.MaxValue,
+                Format = UnpackFormat(),
+                Target = UnpackTextureTarget(),
+                IsSrgb = UnpackSrgb(),
+                IsTextureCoordNormalized = UnpackTextureCoordNormalized(),
+
+            };
+
+            return result;
         }
     }
 }

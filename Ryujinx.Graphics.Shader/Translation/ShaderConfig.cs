@@ -1,8 +1,8 @@
-using System;
+using System.Collections.Generic;
 
 namespace Ryujinx.Graphics.Shader.Translation
 {
-    struct ShaderConfig
+    class ShaderConfig
     {
         public ShaderStage Stage { get; }
 
@@ -18,36 +18,52 @@ namespace Ryujinx.Graphics.Shader.Translation
         public bool         OmapSampleMask { get; }
         public bool         OmapDepth      { get; }
 
+        public IGpuAccessor GpuAccessor { get; }
+
         public TranslationFlags Flags { get; }
 
-        private TranslatorCallbacks _callbacks;
+        public TranslationCounts Counts { get; }
 
-        public ShaderConfig(TranslationFlags flags, TranslatorCallbacks callbacks)
+        public int Size { get; private set; }
+
+        public FeatureFlags UsedFeatures { get; private set; }
+
+        public HashSet<int> TextureHandlesForCache { get; }
+
+        public ShaderConfig(IGpuAccessor gpuAccessor, TranslationFlags flags, TranslationCounts counts)
         {
-            Stage             = ShaderStage.Compute;
-            OutputTopology    = OutputTopology.PointList;
-            MaxOutputVertices = 0;
-            LocalMemorySize   = 0;
-            ImapTypes         = null;
-            OmapTargets       = null;
-            OmapSampleMask    = false;
-            OmapDepth         = false;
-            Flags             = flags;
-            _callbacks        = callbacks;
+            Stage                  = ShaderStage.Compute;
+            OutputTopology         = OutputTopology.PointList;
+            MaxOutputVertices      = 0;
+            LocalMemorySize        = 0;
+            ImapTypes              = null;
+            OmapTargets            = null;
+            OmapSampleMask         = false;
+            OmapDepth              = false;
+            GpuAccessor            = gpuAccessor;
+            Flags                  = flags;
+            Size                   = 0;
+            UsedFeatures           = FeatureFlags.None;
+            Counts                 = counts;
+            TextureHandlesForCache = new HashSet<int>();
         }
 
-        public ShaderConfig(ShaderHeader header, TranslationFlags flags, TranslatorCallbacks callbacks)
+        public ShaderConfig(ShaderHeader header, IGpuAccessor gpuAccessor, TranslationFlags flags, TranslationCounts counts)
         {
-            Stage             = header.Stage;
-            OutputTopology    = header.OutputTopology;
-            MaxOutputVertices = header.MaxOutputVertexCount;
-            LocalMemorySize   = header.ShaderLocalMemoryLowSize + header.ShaderLocalMemoryHighSize;
-            ImapTypes         = header.ImapTypes;
-            OmapTargets       = header.OmapTargets;
-            OmapSampleMask    = header.OmapSampleMask;
-            OmapDepth         = header.OmapDepth;
-            Flags             = flags;
-            _callbacks        = callbacks;
+            Stage                  = header.Stage;
+            OutputTopology         = header.OutputTopology;
+            MaxOutputVertices      = header.MaxOutputVertexCount;
+            LocalMemorySize        = header.ShaderLocalMemoryLowSize + header.ShaderLocalMemoryHighSize;
+            ImapTypes              = header.ImapTypes;
+            OmapTargets            = header.OmapTargets;
+            OmapSampleMask         = header.OmapSampleMask;
+            OmapDepth              = header.OmapDepth;
+            GpuAccessor            = gpuAccessor;
+            Flags                  = flags;
+            Size                   = 0;
+            UsedFeatures           = FeatureFlags.None;
+            Counts                 = counts;
+            TextureHandlesForCache = new HashSet<int>();
         }
 
         public int GetDepthRegister()
@@ -69,50 +85,35 @@ namespace Ryujinx.Graphics.Shader.Translation
             return count + 1;
         }
 
-        public bool QueryInfoBool(QueryInfoName info, int index = 0)
+        public TextureFormat GetTextureFormat(int handle)
         {
-            return Convert.ToBoolean(QueryInfo(info, index));
-        }
-
-        public int QueryInfo(QueryInfoName info, int index = 0)
-        {
-            if (_callbacks.QueryInfo != null)
+            // When the formatted load extension is supported, we don't need to
+            // specify a format, we can just declare it without a format and the GPU will handle it.
+            if (GpuAccessor.QuerySupportsImageLoadFormatted())
             {
-                return _callbacks.QueryInfo(info, index);
-            }
-            else
-            {
-                switch (info)
-                {
-                    case QueryInfoName.ComputeLocalSizeX:
-                    case QueryInfoName.ComputeLocalSizeY:
-                    case QueryInfoName.ComputeLocalSizeZ:
-                        return 1;
-                    case QueryInfoName.ComputeLocalMemorySize:
-                        return 0x1000;
-                    case QueryInfoName.ComputeSharedMemorySize:
-                        return 0xc000;
-                    case QueryInfoName.IsTextureBuffer:
-                        return Convert.ToInt32(false);
-                    case QueryInfoName.IsTextureRectangle:
-                        return Convert.ToInt32(false);
-                    case QueryInfoName.PrimitiveTopology:
-                        return (int)InputTopology.Points;
-                    case QueryInfoName.StorageBufferOffsetAlignment:
-                        return 16;
-                    case QueryInfoName.SupportsNonConstantTextureOffset:
-                        return Convert.ToInt32(true);
-                    case QueryInfoName.TextureFormat:
-                        return (int)TextureFormat.R8G8B8A8Unorm;
-                }
+                return TextureFormat.Unknown;
             }
 
-            return 0;
+            var format = GpuAccessor.QueryTextureFormat(handle);
+
+            if (format == TextureFormat.Unknown)
+            {
+                GpuAccessor.Log($"Unknown format for texture {handle}.");
+
+                format = TextureFormat.R8G8B8A8Unorm;
+            }
+
+            return format;
         }
 
-        public void PrintLog(string message)
+        public void SizeAdd(int size)
         {
-            _callbacks.PrintLog?.Invoke(message);
+            Size += size;
+        }
+
+        public void SetUsedFeature(FeatureFlags flags)
+        {
+            UsedFeatures |= flags;
         }
     }
 }

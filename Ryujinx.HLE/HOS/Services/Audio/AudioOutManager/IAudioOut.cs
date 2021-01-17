@@ -1,23 +1,30 @@
-using ARMeilleure.Memory;
 using Ryujinx.Audio;
+using Ryujinx.Cpu;
 using Ryujinx.HLE.HOS.Ipc;
+using Ryujinx.HLE.HOS.Kernel;
 using Ryujinx.HLE.HOS.Kernel.Common;
 using Ryujinx.HLE.HOS.Kernel.Threading;
 using System;
+using System.Runtime.InteropServices;
 
 namespace Ryujinx.HLE.HOS.Services.Audio.AudioOutManager
 {
     class IAudioOut : IpcService, IDisposable
     {
-        private IAalOutput _audioOut;
-        private KEvent     _releaseEvent;
-        private int        _track;
+        private readonly KernelContext _kernelContext;
+        private readonly IAalOutput    _audioOut;
+        private readonly KEvent        _releaseEvent;
+        private          int           _releaseEventHandle;
+        private readonly int           _track;
+        private readonly int           _clientHandle;
 
-        public IAudioOut(IAalOutput audioOut, KEvent releaseEvent, int track)
+        public IAudioOut(KernelContext kernelContext, IAalOutput audioOut, KEvent releaseEvent, int track, int clientHandle)
         {
-            _audioOut     = audioOut;
-            _releaseEvent = releaseEvent;
-            _track        = track;
+            _kernelContext = kernelContext;
+            _audioOut      = audioOut;
+            _releaseEvent  = releaseEvent;
+            _track         = track;
+            _clientHandle  = clientHandle;
         }
 
         [Command(0)]
@@ -58,12 +65,15 @@ namespace Ryujinx.HLE.HOS.Services.Audio.AudioOutManager
         // RegisterBufferEvent() -> handle<copy>
         public ResultCode RegisterBufferEvent(ServiceCtx context)
         {
-            if (context.Process.HandleTable.GenerateHandle(_releaseEvent.ReadableEvent, out int handle) != KernelResult.Success)
+            if (_releaseEventHandle == 0)
             {
-                throw new InvalidOperationException("Out of handles!");
+                if (context.Process.HandleTable.GenerateHandle(_releaseEvent.ReadableEvent, out _releaseEventHandle) != KernelResult.Success)
+                {
+                    throw new InvalidOperationException("Out of handles!");
+                }
             }
 
-            context.Response.HandleDesc = IpcHandleDesc.MakeCopy(handle);
+            context.Response.HandleDesc = IpcHandleDesc.MakeCopy(_releaseEventHandle);
 
             return ResultCode.Success;
         }
@@ -84,16 +94,16 @@ namespace Ryujinx.HLE.HOS.Services.Audio.AudioOutManager
         {
             long tag = context.RequestData.ReadInt64();
 
-            context.ResponseData.Write(_audioOut.ContainsBuffer(_track, tag) ? 1 : 0);
+            context.ResponseData.Write(_audioOut.ContainsBuffer(_track, tag));
 
-            return 0;
+            return ResultCode.Success;
         }
 
         [Command(7)] // 3.0.0+
         // AppendAudioOutBufferAuto(u64 tag, buffer<nn::audio::AudioOutBuffer, 0x21>)
         public ResultCode AppendAudioOutBufferAuto(ServiceCtx context)
         {
-            (long position, long size) = context.Request.GetBufferType0x21();
+            (long position, _) = context.Request.GetBufferType0x21();
 
             return AppendAudioOutBufferImpl(context, position);
         }
@@ -102,13 +112,12 @@ namespace Ryujinx.HLE.HOS.Services.Audio.AudioOutManager
         {
             long tag = context.RequestData.ReadInt64();
 
-            AudioOutData data = MemoryHelper.Read<AudioOutData>(
-                context.Memory,
-                position);
+            AudioOutData data = MemoryHelper.Read<AudioOutData>(context.Memory, position);
 
-            byte[] buffer = context.Memory.ReadBytes(
-                data.SampleBufferPtr,
-                data.SampleBufferSize);
+            // NOTE: Assume PCM16 all the time, change if new format are found.
+            short[] buffer = new short[data.SampleBufferSize / sizeof(short)];
+
+            context.Process.HandleTable.GetKProcess(_clientHandle).CpuMemory.Read((ulong)data.SampleBufferPtr, MemoryMarshal.Cast<short, byte>(buffer));
 
             _audioOut.AppendBuffer(_track, tag, buffer);
 
@@ -139,10 +148,43 @@ namespace Ryujinx.HLE.HOS.Services.Audio.AudioOutManager
                     tag = releasedBuffers[index];
                 }
 
-                context.Memory.WriteInt64(position + index * 8, tag);
+                context.Memory.Write((ulong)(position + index * 8), tag);
             }
 
             context.ResponseData.Write(releasedBuffers.Length);
+
+            return ResultCode.Success;
+        }
+
+        [Command(9)] // 4.0.0+
+        // GetAudioOutBufferCount() -> u32
+        public ResultCode GetAudioOutBufferCount(ServiceCtx context)
+        {
+            uint bufferCount = _audioOut.GetBufferCount(_track);
+
+            context.ResponseData.Write(bufferCount);
+
+            return ResultCode.Success;
+        }
+
+        [Command(10)] // 4.0.0+
+        // GetAudioOutPlayedSampleCount() -> u64
+        public ResultCode GetAudioOutPlayedSampleCount(ServiceCtx context)
+        {
+            ulong playedSampleCount = _audioOut.GetPlayedSampleCount(_track);
+
+            context.ResponseData.Write(playedSampleCount);
+
+            return ResultCode.Success;
+        }
+
+        [Command(11)] // 4.0.0+
+        // FlushAudioOutBuffers() -> b8
+        public ResultCode FlushAudioOutBuffers(ServiceCtx context)
+        {
+            bool heldBuffers = _audioOut.FlushBuffers(_track);
+
+            context.ResponseData.Write(heldBuffers);
 
             return ResultCode.Success;
         }
@@ -151,13 +193,9 @@ namespace Ryujinx.HLE.HOS.Services.Audio.AudioOutManager
         // SetAudioOutVolume(s32)
         public ResultCode SetAudioOutVolume(ServiceCtx context)
         {
-            // Games send a gain value here, so we need to apply it on the current volume value.
+            float volume = context.RequestData.ReadSingle();
 
-            float gain          = context.RequestData.ReadSingle();
-            float currentVolume = _audioOut.GetVolume();
-            float newVolume     = Math.Clamp(currentVolume + gain, 0.0f, 1.0f);
-
-            _audioOut.SetVolume(newVolume);
+            _audioOut.SetVolume(_track, volume);
 
             return ResultCode.Success;
         }
@@ -166,7 +204,7 @@ namespace Ryujinx.HLE.HOS.Services.Audio.AudioOutManager
         // GetAudioOutVolume() -> s32
         public ResultCode GetAudioOutVolume(ServiceCtx context)
         {
-            float volume = _audioOut.GetVolume();
+            float volume = _audioOut.GetVolume(_track);
 
             context.ResponseData.Write(volume);
 
@@ -182,6 +220,7 @@ namespace Ryujinx.HLE.HOS.Services.Audio.AudioOutManager
         {
             if (disposing)
             {
+                _kernelContext.Syscall.CloseHandle(_clientHandle);
                 _audioOut.CloseTrack(_track);
             }
         }

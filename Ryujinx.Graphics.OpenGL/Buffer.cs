@@ -4,22 +4,48 @@ using System;
 
 namespace Ryujinx.Graphics.OpenGL
 {
-    class Buffer : IBuffer
+    static class Buffer
     {
-        public int Handle { get; }
-
-        public Buffer(int size)
+        public static void Clear(BufferHandle destination, int offset, int size, uint value)
         {
-            Handle = GL.GenBuffer();
+            GL.BindBuffer(BufferTarget.CopyWriteBuffer, destination.ToInt32());
 
-            GL.BindBuffer(BufferTarget.CopyWriteBuffer, Handle);
-            GL.BufferData(BufferTarget.CopyWriteBuffer, size, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+            unsafe
+            {
+                uint* valueArr = stackalloc uint[1];
+
+                valueArr[0] = value;
+
+                GL.ClearBufferSubData(
+                    BufferTarget.CopyWriteBuffer,
+                    PixelInternalFormat.Rgba8ui,
+                    (IntPtr)offset,
+                    (IntPtr)size,
+                    PixelFormat.RgbaInteger,
+                    PixelType.UnsignedByte,
+                    (IntPtr)valueArr);
+            }
         }
 
-        public void CopyTo(IBuffer destination, int srcOffset, int dstOffset, int size)
+        public static BufferHandle Create()
         {
-            GL.BindBuffer(BufferTarget.CopyReadBuffer, Handle);
-            GL.BindBuffer(BufferTarget.CopyWriteBuffer, ((Buffer)destination).Handle);
+            return Handle.FromInt32<BufferHandle>(GL.GenBuffer());
+        }
+
+        public static BufferHandle Create(int size)
+        {
+            int handle = GL.GenBuffer();
+
+            GL.BindBuffer(BufferTarget.CopyWriteBuffer, handle);
+            GL.BufferData(BufferTarget.CopyWriteBuffer, size, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+
+            return Handle.FromInt32<BufferHandle>(handle);
+        }
+
+        public static void Copy(BufferHandle source, BufferHandle destination, int srcOffset, int dstOffset, int size)
+        {
+            GL.BindBuffer(BufferTarget.CopyReadBuffer, source.ToInt32());
+            GL.BindBuffer(BufferTarget.CopyWriteBuffer, destination.ToInt32());
 
             GL.CopyBufferSubData(
                 BufferTarget.CopyReadBuffer,
@@ -29,9 +55,9 @@ namespace Ryujinx.Graphics.OpenGL
                 (IntPtr)size);
         }
 
-        public byte[] GetData(int offset, int size)
+        public static byte[] GetData(BufferHandle buffer, int offset, int size)
         {
-            GL.BindBuffer(BufferTarget.CopyReadBuffer, Handle);
+            GL.BindBuffer(BufferTarget.CopyReadBuffer, buffer.ToInt32());
 
             byte[] data = new byte[size];
 
@@ -40,22 +66,15 @@ namespace Ryujinx.Graphics.OpenGL
             return data;
         }
 
-        public void SetData(ReadOnlySpan<byte> data)
+        public static void Resize(BufferHandle handle, int size)
         {
-            unsafe
-            {
-                GL.BindBuffer(BufferTarget.CopyWriteBuffer, Handle);
-
-                fixed (byte* ptr = data)
-                {
-                    GL.BufferData(BufferTarget.CopyWriteBuffer, data.Length, (IntPtr)ptr, BufferUsageHint.DynamicDraw);
-                }
-            }
+            GL.BindBuffer(BufferTarget.CopyWriteBuffer, handle.ToInt32());
+            GL.BufferData(BufferTarget.CopyWriteBuffer, size, IntPtr.Zero, BufferUsageHint.StreamCopy);
         }
 
-        public void SetData(int offset, ReadOnlySpan<byte> data)
+        public static void SetData(BufferHandle buffer, int offset, ReadOnlySpan<byte> data)
         {
-            GL.BindBuffer(BufferTarget.CopyWriteBuffer, Handle);
+            GL.BindBuffer(BufferTarget.CopyWriteBuffer, buffer.ToInt32());
 
             unsafe
             {
@@ -66,9 +85,9 @@ namespace Ryujinx.Graphics.OpenGL
             }
         }
 
-        public void Dispose()
+        public static void Delete(BufferHandle buffer)
         {
-            GL.DeleteBuffer(Handle);
+            GL.DeleteBuffer(buffer.ToInt32());
         }
     }
 }

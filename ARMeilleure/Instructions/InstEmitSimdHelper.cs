@@ -4,6 +4,7 @@ using ARMeilleure.State;
 using ARMeilleure.Translation;
 using System;
 using System.Diagnostics;
+using System.Reflection;
 
 using static ARMeilleure.Instructions.InstEmitHelper;
 using static ARMeilleure.IntermediateRepresentation.OperandHelper;
@@ -310,68 +311,39 @@ namespace ARMeilleure.Instructions
             context.Copy(GetVec(op.Rd), res);
         }
 
-        public static Operand EmitUnaryMathCall(ArmEmitterContext context, _F32_F32 f32, _F64_F64 f64, Operand n)
+        public static Operand EmitUnaryMathCall(ArmEmitterContext context, string name, Operand n)
         {
             IOpCodeSimd op = (IOpCodeSimd)context.CurrOp;
 
-            return (op.Size & 1) == 0 ? context.Call(f32, n) : context.Call(f64, n);
+            MethodInfo info = (op.Size & 1) == 0
+                ? typeof(MathF).GetMethod(name, new Type[] { typeof(float) })
+                : typeof(Math). GetMethod(name, new Type[] { typeof(double) });
+
+            return context.Call(info, n);
         }
 
         public static Operand EmitRoundMathCall(ArmEmitterContext context, MidpointRounding roundMode, Operand n)
         {
             IOpCodeSimd op = (IOpCodeSimd)context.CurrOp;
 
-            Delegate dlg;
+            string name = nameof(Math.Round);
 
-            if ((op.Size & 1) == 0)
-            {
-                dlg = new _F32_F32_MidpointRounding(MathF.Round);
-            }
-            else /* if ((op.Size & 1) == 1) */
-            {
-                dlg = new _F64_F64_MidpointRounding(Math.Round);
-            }
+            MethodInfo info = (op.Size & 1) == 0
+                ? typeof(MathF).GetMethod(name, new Type[] { typeof(float),  typeof(MidpointRounding) })
+                : typeof(Math). GetMethod(name, new Type[] { typeof(double), typeof(MidpointRounding) });
 
-            return context.Call(dlg, n, Const((int)roundMode));
+            return context.Call(info, n, Const((int)roundMode));
         }
 
-        public static Operand EmitSoftFloatCall(
-            ArmEmitterContext context,
-            _F32_F32 f32,
-            _F64_F64 f64,
-            params Operand[] callArgs)
+        public static Operand EmitSoftFloatCall(ArmEmitterContext context, string name, params Operand[] callArgs)
         {
             IOpCodeSimd op = (IOpCodeSimd)context.CurrOp;
 
-            Delegate dlg = (op.Size & 1) == 0 ? (Delegate)f32 : (Delegate)f64;
+            MethodInfo info = (op.Size & 1) == 0
+                ? typeof(SoftFloat32).GetMethod(name)
+                : typeof(SoftFloat64).GetMethod(name);
 
-            return context.Call(dlg, callArgs);
-        }
-
-        public static Operand EmitSoftFloatCall(
-            ArmEmitterContext context,
-            _F32_F32_F32 f32,
-            _F64_F64_F64 f64,
-            params Operand[] callArgs)
-        {
-            IOpCodeSimd op = (IOpCodeSimd)context.CurrOp;
-
-            Delegate dlg = (op.Size & 1) == 0 ? (Delegate)f32 : (Delegate)f64;
-
-            return context.Call(dlg, callArgs);
-        }
-
-        public static Operand EmitSoftFloatCall(
-            ArmEmitterContext context,
-            _F32_F32_F32_F32 f32,
-            _F64_F64_F64_F64 f64,
-            params Operand[] callArgs)
-        {
-            IOpCodeSimd op = (IOpCodeSimd)context.CurrOp;
-
-            Delegate dlg = (op.Size & 1) == 0 ? (Delegate)f32 : (Delegate)f64;
-
-            return context.Call(dlg, callArgs);
+            return context.Call(info, callArgs);
         }
 
         public static void EmitScalarBinaryOpByElemF(ArmEmitterContext context, Func2I emit)
@@ -1103,6 +1075,49 @@ namespace ARMeilleure.Instructions
             context.Copy(GetVec(op.Rd), d);
         }
 
+        public static void EmitVectorAcrossVectorOpF(ArmEmitterContext context, Func2I emit)
+        {
+            OpCodeSimd op = (OpCodeSimd)context.CurrOp;
+
+            Debug.Assert((op.Size & 1) == 0 && op.RegisterSize == RegisterSize.Simd128);
+
+            Operand res = context.VectorExtract(OperandType.FP32, GetVec(op.Rn), 0);
+
+            for (int index = 1; index < 4; index++)
+            {
+                Operand n = context.VectorExtract(OperandType.FP32, GetVec(op.Rn), index);
+
+                res = emit(res, n);
+            }
+
+            Operand d = context.VectorInsert(context.VectorZero(), res, 0);
+
+            context.Copy(GetVec(op.Rd), d);
+        }
+
+        public static void EmitSse2VectorAcrossVectorOpF(ArmEmitterContext context, Func2I emit)
+        {
+            OpCodeSimd op = (OpCodeSimd)context.CurrOp;
+
+            Debug.Assert((op.Size & 1) == 0 && op.RegisterSize == RegisterSize.Simd128);
+
+            const int sm0 = 0 << 6 | 0 << 4 | 0 << 2 | 0 << 0;
+            const int sm1 = 1 << 6 | 1 << 4 | 1 << 2 | 1 << 0;
+            const int sm2 = 2 << 6 | 2 << 4 | 2 << 2 | 2 << 0;
+            const int sm3 = 3 << 6 | 3 << 4 | 3 << 2 | 3 << 0;
+
+            Operand nCopy = context.Copy(GetVec(op.Rn));
+
+            Operand part0 = context.AddIntrinsic(Intrinsic.X86Shufps, nCopy, nCopy, Const(sm0));
+            Operand part1 = context.AddIntrinsic(Intrinsic.X86Shufps, nCopy, nCopy, Const(sm1));
+            Operand part2 = context.AddIntrinsic(Intrinsic.X86Shufps, nCopy, nCopy, Const(sm2));
+            Operand part3 = context.AddIntrinsic(Intrinsic.X86Shufps, nCopy, nCopy, Const(sm3));
+
+            Operand res = emit(emit(part0, part1), emit(part2, part3));
+
+            context.Copy(GetVec(op.Rd), context.VectorZeroUpper96(res));
+        }
+
         public static void EmitVectorPairwiseOpF(ArmEmitterContext context, Func2I emit)
         {
             OpCodeSimdReg op = (OpCodeSimdReg)context.CurrOp;
@@ -1132,12 +1147,12 @@ namespace ARMeilleure.Instructions
             context.Copy(GetVec(op.Rd), res);
         }
 
-        public static void EmitSse2VectorPairwiseOpF(ArmEmitterContext context, Intrinsic inst32, Intrinsic inst64)
+        public static void EmitSse2VectorPairwiseOpF(ArmEmitterContext context, Func2I emit)
         {
             OpCodeSimdReg op = (OpCodeSimdReg)context.CurrOp;
 
-            Operand n = GetVec(op.Rn);
-            Operand m = GetVec(op.Rm);
+            Operand nCopy = context.Copy(GetVec(op.Rn));
+            Operand mCopy = context.Copy(GetVec(op.Rm));
 
             int sizeF = op.Size & 1;
 
@@ -1145,33 +1160,66 @@ namespace ARMeilleure.Instructions
             {
                 if (op.RegisterSize == RegisterSize.Simd64)
                 {
-                    Operand unpck = context.AddIntrinsic(Intrinsic.X86Unpcklps, n, m);
+                    Operand unpck = context.AddIntrinsic(Intrinsic.X86Unpcklps, nCopy, mCopy);
 
                     Operand zero = context.VectorZero();
 
                     Operand part0 = context.AddIntrinsic(Intrinsic.X86Movlhps, unpck, zero);
                     Operand part1 = context.AddIntrinsic(Intrinsic.X86Movhlps, zero, unpck);
 
-                    context.Copy(GetVec(op.Rd), context.AddIntrinsic(inst32, part0, part1));
+                    context.Copy(GetVec(op.Rd), emit(part0, part1));
                 }
                 else /* if (op.RegisterSize == RegisterSize.Simd128) */
                 {
                     const int sm0 = 2 << 6 | 0 << 4 | 2 << 2 | 0 << 0;
                     const int sm1 = 3 << 6 | 1 << 4 | 3 << 2 | 1 << 0;
 
-                    Operand part0 = context.AddIntrinsic(Intrinsic.X86Shufps, n, m, Const(sm0));
-                    Operand part1 = context.AddIntrinsic(Intrinsic.X86Shufps, n, m, Const(sm1));
+                    Operand part0 = context.AddIntrinsic(Intrinsic.X86Shufps, nCopy, mCopy, Const(sm0));
+                    Operand part1 = context.AddIntrinsic(Intrinsic.X86Shufps, nCopy, mCopy, Const(sm1));
 
-                    context.Copy(GetVec(op.Rd), context.AddIntrinsic(inst32, part0, part1));
+                    context.Copy(GetVec(op.Rd), emit(part0, part1));
                 }
             }
             else /* if (sizeF == 1) */
             {
-                Operand part0 = context.AddIntrinsic(Intrinsic.X86Unpcklpd, n, m);
-                Operand part1 = context.AddIntrinsic(Intrinsic.X86Unpckhpd, n, m);
+                Operand part0 = context.AddIntrinsic(Intrinsic.X86Unpcklpd, nCopy, mCopy);
+                Operand part1 = context.AddIntrinsic(Intrinsic.X86Unpckhpd, nCopy, mCopy);
 
-                context.Copy(GetVec(op.Rd), context.AddIntrinsic(inst64, part0, part1));
+                context.Copy(GetVec(op.Rd), emit(part0, part1));
             }
+        }
+
+        [Flags]
+        public enum Mxcsr
+        {
+            Ftz = 1 << 15, // Flush To Zero.
+            Um  = 1 << 11, // Underflow Mask.
+            Dm  = 1 << 8,  // Denormal Mask.
+            Daz = 1 << 6   // Denormals Are Zero.
+        }
+
+        public static void EmitSseOrAvxEnterFtzAndDazModesOpF(ArmEmitterContext context, out Operand isTrue)
+        {
+            isTrue = context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetFpcrFz)));
+
+            Operand lblTrue = Label();
+            context.BranchIfFalse(lblTrue, isTrue);
+
+            context.AddIntrinsicNoRet(Intrinsic.X86Mxcsrmb, Const((int)(Mxcsr.Ftz | Mxcsr.Um | Mxcsr.Dm | Mxcsr.Daz)));
+
+            context.MarkLabel(lblTrue);
+        }
+
+        public static void EmitSseOrAvxExitFtzAndDazModesOpF(ArmEmitterContext context, Operand isTrue = null)
+        {
+            isTrue ??= context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetFpcrFz)));
+
+            Operand lblTrue = Label();
+            context.BranchIfFalse(lblTrue, isTrue);
+
+            context.AddIntrinsicNoRet(Intrinsic.X86Mxcsrub, Const((int)(Mxcsr.Ftz | Mxcsr.Daz)));
+
+            context.MarkLabel(lblTrue);
         }
 
         public enum CmpCondition
@@ -1405,22 +1453,22 @@ namespace ARMeilleure.Instructions
                 throw new ArgumentOutOfRangeException(nameof(sizeDst));
             }
 
-            Delegate dlg;
+            MethodInfo info;
 
             if (signedSrc)
             {
-                dlg = signedDst
-                    ? (Delegate)new _S64_S64_S32(SoftFallback.SignedSrcSignedDstSatQ)
-                    : (Delegate)new _U64_S64_S32(SoftFallback.SignedSrcUnsignedDstSatQ);
+                info = signedDst
+                    ? typeof(SoftFallback).GetMethod(nameof(SoftFallback.SignedSrcSignedDstSatQ))
+                    : typeof(SoftFallback).GetMethod(nameof(SoftFallback.SignedSrcUnsignedDstSatQ));
             }
             else
             {
-                dlg = signedDst
-                    ? (Delegate)new _S64_U64_S32(SoftFallback.UnsignedSrcSignedDstSatQ)
-                    : (Delegate)new _U64_U64_S32(SoftFallback.UnsignedSrcUnsignedDstSatQ);
+                info = signedDst
+                    ? typeof(SoftFallback).GetMethod(nameof(SoftFallback.UnsignedSrcSignedDstSatQ))
+                    : typeof(SoftFallback).GetMethod(nameof(SoftFallback.UnsignedSrcUnsignedDstSatQ));
             }
 
-            return context.Call(dlg, op, Const(sizeDst));
+            return context.Call(info, op, Const(sizeDst));
         }
 
         // TSrc (64bit) == TDst (64bit); signed.
@@ -1428,7 +1476,7 @@ namespace ARMeilleure.Instructions
         {
             Debug.Assert(((OpCodeSimd)context.CurrOp).Size == 3, "Invalid element size.");
 
-            return context.Call(new _S64_S64(SoftFallback.UnarySignedSatQAbsOrNeg), op);
+            return context.Call(typeof(SoftFallback).GetMethod(nameof(SoftFallback.UnarySignedSatQAbsOrNeg)), op);
         }
 
         // TSrcs (64bit) == TDst (64bit); signed, unsigned.
@@ -1436,11 +1484,11 @@ namespace ARMeilleure.Instructions
         {
             Debug.Assert(((OpCodeSimd)context.CurrOp).Size == 3, "Invalid element size.");
 
-            Delegate dlg = signed
-                ? (Delegate)new _S64_S64_S64(SoftFallback.BinarySignedSatQAdd)
-                : (Delegate)new _U64_U64_U64(SoftFallback.BinaryUnsignedSatQAdd);
+            MethodInfo info = signed
+                ? typeof(SoftFallback).GetMethod(nameof(SoftFallback.BinarySignedSatQAdd))
+                : typeof(SoftFallback).GetMethod(nameof(SoftFallback.BinaryUnsignedSatQAdd));
 
-            return context.Call(dlg, op1, op2);
+            return context.Call(info, op1, op2);
         }
 
         // TSrcs (64bit) == TDst (64bit); signed, unsigned.
@@ -1448,11 +1496,11 @@ namespace ARMeilleure.Instructions
         {
             Debug.Assert(((OpCodeSimd)context.CurrOp).Size == 3, "Invalid element size.");
 
-            Delegate dlg = signed
-                ? (Delegate)new _S64_S64_S64(SoftFallback.BinarySignedSatQSub)
-                : (Delegate)new _U64_U64_U64(SoftFallback.BinaryUnsignedSatQSub);
+            MethodInfo info = signed
+                ? typeof(SoftFallback).GetMethod(nameof(SoftFallback.BinarySignedSatQSub))
+                : typeof(SoftFallback).GetMethod(nameof(SoftFallback.BinaryUnsignedSatQSub));
 
-            return context.Call(dlg, op1, op2);
+            return context.Call(info, op1, op2);
         }
 
         // TSrcs (64bit) == TDst (64bit); signed, unsigned.
@@ -1460,11 +1508,11 @@ namespace ARMeilleure.Instructions
         {
             Debug.Assert(((OpCodeSimd)context.CurrOp).Size == 3, "Invalid element size.");
 
-            Delegate dlg = signed
-                ? (Delegate)new _S64_U64_S64(SoftFallback.BinarySignedSatQAcc)
-                : (Delegate)new _U64_S64_U64(SoftFallback.BinaryUnsignedSatQAcc);
+            MethodInfo info = signed
+                ? typeof(SoftFallback).GetMethod(nameof(SoftFallback.BinarySignedSatQAcc))
+                : typeof(SoftFallback).GetMethod(nameof(SoftFallback.BinaryUnsignedSatQAcc));
 
-            return context.Call(dlg, op1, op2);
+            return context.Call(info, op1, op2);
         }
 
         public static Operand EmitFloatAbs(ArmEmitterContext context, Operand value, bool single, bool vector)
@@ -1473,7 +1521,7 @@ namespace ARMeilleure.Instructions
             if (single)
             {
                 mask = vector ? X86GetAllElements(context, -0f) : X86GetScalar(context, -0f);
-            } 
+            }
             else
             {
                 mask = vector ? X86GetAllElements(context, -0d) : X86GetScalar(context, -0d);

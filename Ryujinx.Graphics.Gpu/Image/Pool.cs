@@ -1,3 +1,5 @@
+using Ryujinx.Common;
+using Ryujinx.Cpu.Tracking;
 using Ryujinx.Graphics.Gpu.Memory;
 using System;
 
@@ -33,6 +35,9 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// </summary>
         public ulong Size { get; }
 
+        private readonly CpuMultiRegionHandle _memoryTracking;
+        private readonly Action<ulong, ulong> _modifiedDelegate;
+
         public Pool(GpuContext context, ulong address, int maximumId)
         {
             Context   = context;
@@ -40,12 +45,15 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             int count = maximumId + 1;
 
-            ulong size = (ulong)(uint)count * DescriptorSize;;
+            ulong size = (ulong)(uint)count * DescriptorSize;
 
             Items = new T[count];
 
             Address = address;
             Size    = size;
+
+            _memoryTracking = context.PhysicalMemory.BeginGranularTracking(address, size);
+            _modifiedDelegate = RegionModified;
         }
 
         /// <summary>
@@ -62,61 +70,29 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// </summary>
         public void SynchronizeMemory()
         {
-            (ulong, ulong)[] modifiedRanges = Context.PhysicalMemory.GetModifiedRanges(Address, Size, ResourceName.TexturePool);
-
-            for (int index = 0; index < modifiedRanges.Length; index++)
-            {
-                (ulong mAddress, ulong mSize) = modifiedRanges[index];
-
-                if (mAddress < Address)
-                {
-                    mAddress = Address;
-                }
-
-                ulong maxSize = Address + Size - mAddress;
-
-                if (mSize > maxSize)
-                {
-                    mSize = maxSize;
-                }
-
-                InvalidateRangeImpl(mAddress, mSize);
-            }
+            _memoryTracking.QueryModified(_modifiedDelegate);
         }
 
         /// <summary>
-        /// Invalidates a range of memory of the GPU resource pool.
-        /// Entries that falls inside the speicified range will be invalidated,
-        /// causing all the data to be reloaded from guest memory.
+        /// Indicate that a region of the pool was modified, and must be loaded from memory.
         /// </summary>
-        /// <param name="address">The start address of the range to invalidate</param>
-        /// <param name="size">The size of the range to invalidate</param>
-        public void InvalidateRange(ulong address, ulong size)
+        /// <param name="mAddress">Start address of the modified region</param>
+        /// <param name="mSize">Size of the modified region</param>
+        private void RegionModified(ulong mAddress, ulong mSize)
         {
-            ulong endAddress = address + size;
-
-            ulong texturePoolEndAddress = Address + Size;
-
-            // If the range being invalidated is not overlapping the texture pool range,
-            // then we don't have anything to do, exit early.
-            if (address >= texturePoolEndAddress || endAddress <= Address)
+            if (mAddress < Address)
             {
-                return;
+                mAddress = Address;
             }
 
-            if (address < Address)
+            ulong maxSize = Address + Size - mAddress;
+
+            if (mSize > maxSize)
             {
-                address = Address;
+                mSize = maxSize;
             }
 
-            if (endAddress > texturePoolEndAddress)
-            {
-                endAddress = texturePoolEndAddress;
-            }
-
-            size = endAddress - address;
-
-            InvalidateRangeImpl(address, size);
+            InvalidateRangeImpl(mAddress, mSize);
         }
 
         protected abstract void InvalidateRangeImpl(ulong address, ulong size);
@@ -138,6 +114,7 @@ namespace Ryujinx.Graphics.Gpu.Image
 
                 Items = null;
             }
+            _memoryTracking.Dispose();
         }
     }
 }

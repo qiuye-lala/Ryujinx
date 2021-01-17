@@ -1,9 +1,9 @@
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu.Memory;
+using Ryujinx.Graphics.Texture;
 using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 
 namespace Ryujinx.Graphics.Gpu.Image
 {
@@ -52,16 +52,16 @@ namespace Ryujinx.Graphics.Gpu.Image
             {
                 TextureDescriptor descriptor = GetDescriptor(id);
 
-                TextureInfo info = GetInfo(descriptor);
+                TextureInfo info = GetInfo(descriptor, out int layerSize);
 
                 // Bad address. We can't add a texture with a invalid address
                 // to the cache.
-                if (info.Address == MemoryManager.BadAddress)
+                if (info.Address == MemoryManager.PteUnmapped)
                 {
                     return null;
                 }
 
-                texture = Context.Methods.TextureManager.FindOrCreateTexture(info, TextureSearchFlags.Sampler);
+                texture = Context.Methods.TextureManager.FindOrCreateTexture(info, TextureSearchFlags.ForSampler, layerSize);
 
                 texture.IncrementReferenceCount();
 
@@ -69,6 +69,22 @@ namespace Ryujinx.Graphics.Gpu.Image
             }
             else
             {
+                if (texture.ChangedSize)
+                {
+                    // Texture changed size at one point - it may be a different size than the sampler expects.
+                    // This can be triggered when the size is changed by a size hint on copy or draw, but the texture has been sampled before.
+
+                    TextureDescriptor descriptor = GetDescriptor(id);
+
+                    int width = descriptor.UnpackWidth();
+                    int height = descriptor.UnpackHeight();
+
+                    if (texture.Info.Width != width || texture.Info.Height != height)
+                    {
+                        texture.ChangeSize(width, height, texture.Info.DepthOrLayers);
+                    }
+                }
+
                 // Memory is automatically synchronized on texture creation.
                 texture.SynchronizeMemory();
             }
@@ -83,11 +99,7 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <returns>The texture descriptor</returns>
         public TextureDescriptor GetDescriptor(int id)
         {
-            ulong address = Address + (ulong)(uint)id * DescriptorSize;
-
-            ReadOnlySpan<byte> data = Context.PhysicalMemory.GetSpan(address, DescriptorSize);
-
-            return MemoryMarshal.Cast<byte, TextureDescriptor>(data)[0];
+            return Context.PhysicalMemory.Read<TextureDescriptor>(Address + (ulong)id * DescriptorSize);
         }
 
         /// <summary>
@@ -107,13 +119,11 @@ namespace Ryujinx.Graphics.Gpu.Image
 
                 if (texture != null)
                 {
-                    ReadOnlySpan<byte> data = Context.PhysicalMemory.GetSpan(address, DescriptorSize);
-
-                    TextureDescriptor descriptor = MemoryMarshal.Cast<byte, TextureDescriptor>(data)[0];
+                    TextureDescriptor descriptor = Context.PhysicalMemory.Read<TextureDescriptor>(address);
 
                     // If the descriptors are the same, the texture is the same,
                     // we don't need to remove as it was not modified. Just continue.
-                    if (texture.IsPerfectMatch(GetInfo(descriptor), TextureSearchFlags.Strict))
+                    if (texture.IsExactMatch(GetInfo(descriptor, out _), TextureSearchFlags.Strict) != TextureMatchQuality.NoMatch)
                     {
                         continue;
                     }
@@ -129,10 +139,12 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// Gets texture information from a texture descriptor.
         /// </summary>
         /// <param name="descriptor">The texture descriptor</param>
+        /// <param name="layerSize">Layer size for textures using a sub-range of mipmap levels, otherwise 0</param>
         /// <returns>The texture information</returns>
-        private TextureInfo GetInfo(TextureDescriptor descriptor)
+        private TextureInfo GetInfo(TextureDescriptor descriptor, out int layerSize)
         {
             ulong address = Context.MemoryManager.Translate(descriptor.UnpackAddress());
+            bool addressIsValid = address != MemoryManager.PteUnmapped;
 
             int width         = descriptor.UnpackWidth();
             int height        = descriptor.UnpackHeight();
@@ -152,12 +164,31 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             Target target = descriptor.UnpackTextureTarget().Convert((samplesInX | samplesInY) != 1);
 
+            // We use 2D targets for 1D textures as that makes texture cache
+            // management easier. We don't know the target for render target
+            // and copies, so those would normally use 2D targets, which are
+            // not compatible with 1D targets. By doing that we also allow those
+            // to match when looking for compatible textures on the cache.
+            if (target == Target.Texture1D)
+            {
+                target = Target.Texture2D;
+                height = 1;
+            }
+            else if (target == Target.Texture1DArray)
+            {
+                target = Target.Texture2DArray;
+                height = 1;
+            }
+
             uint format = descriptor.UnpackFormat();
             bool srgb   = descriptor.UnpackSrgb();
 
             if (!FormatTable.TryGetTextureFormat(format, srgb, out FormatInfo formatInfo))
             {
-                Logger.PrintDebug(LogClass.Gpu, $"Invalid texture format 0x{format:X} (sRGB: {srgb}).");
+                if (addressIsValid && (int)format > 0)
+                {
+                    Logger.Error?.Print(LogClass.Gpu, $"Invalid texture format 0x{format:X} (sRGB: {srgb}).");
+                }
 
                 formatInfo = FormatInfo.Default;
             }
@@ -166,6 +197,53 @@ namespace Ryujinx.Graphics.Gpu.Image
             int gobBlocksInZ = descriptor.UnpackGobBlocksInZ();
 
             int gobBlocksInTileX = descriptor.UnpackGobBlocksInTileX();
+
+            layerSize = 0;
+
+            int minLod = descriptor.UnpackBaseLevel();
+            int maxLod = descriptor.UnpackMaxLevelInclusive();
+
+            // Linear textures don't support mipmaps, so we don't handle this case here.
+            if ((minLod != 0 || maxLod + 1 != levels) && target != Target.TextureBuffer && !isLinear && addressIsValid)
+            {
+                int depth  = TextureInfo.GetDepth(target, depthOrLayers);
+                int layers = TextureInfo.GetLayers(target, depthOrLayers);
+
+                SizeInfo sizeInfo = SizeCalculator.GetBlockLinearTextureSize(
+                    width,
+                    height,
+                    depth,
+                    levels,
+                    layers,
+                    formatInfo.BlockWidth,
+                    formatInfo.BlockHeight,
+                    formatInfo.BytesPerPixel,
+                    gobBlocksInY,
+                    gobBlocksInZ,
+                    gobBlocksInTileX);
+
+                layerSize = sizeInfo.LayerSize;
+
+                if (minLod != 0)
+                {
+                    // If the base level is not zero, we additionally add the mip level offset
+                    // to the address, this allows the texture manager to find the base level from the
+                    // address if there is a overlapping texture on the cache that can contain the new texture.
+                    address += (ulong)sizeInfo.GetMipOffset(minLod);
+
+                    width  = Math.Max(1, width  >> minLod);
+                    height = Math.Max(1, height >> minLod);
+
+                    if (target == Target.Texture3D)
+                    {
+                        depthOrLayers = Math.Max(1, depthOrLayers >> minLod);
+                    }
+
+                    (gobBlocksInY, gobBlocksInZ) = SizeCalculator.GetMipGobBlockSizes(height, depth, formatInfo.BlockHeight, gobBlocksInY, gobBlocksInZ);
+                }
+
+                levels = (maxLod - minLod) + 1;
+            }
 
             SwizzleComponent swizzleR = descriptor.UnpackSwizzleR().Convert();
             SwizzleComponent swizzleG = descriptor.UnpackSwizzleG().Convert();
@@ -178,6 +256,22 @@ namespace Ryujinx.Graphics.Gpu.Image
                 swizzleG,
                 swizzleB,
                 swizzleA);
+
+            if (formatInfo.Format.IsDepthOrStencil())
+            {
+                swizzleR = SwizzleComponent.Red;
+                swizzleG = SwizzleComponent.Red;
+                swizzleB = SwizzleComponent.Red;
+
+                if (depthStencilMode == DepthStencilMode.Depth)
+                {
+                    swizzleA = SwizzleComponent.One;
+                }
+                else
+                {
+                    swizzleA = SwizzleComponent.Red;
+                }
+            }
 
             return new TextureInfo(
                 address,

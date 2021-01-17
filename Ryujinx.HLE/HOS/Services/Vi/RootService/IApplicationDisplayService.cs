@@ -1,4 +1,6 @@
-using ARMeilleure.Memory;
+using Ryujinx.Common;
+using Ryujinx.Common.Logging;
+using Ryujinx.Cpu;
 using Ryujinx.HLE.HOS.Ipc;
 using Ryujinx.HLE.HOS.Kernel.Common;
 using Ryujinx.HLE.HOS.Services.SurfaceFlinger;
@@ -10,7 +12,9 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
 {
     class IApplicationDisplayService : IpcService
     {
-        private IdDictionary _displays;
+        private readonly IdDictionary _displays;
+
+        private int _vsyncEventHandle;
 
         public IApplicationDisplayService()
         {
@@ -62,11 +66,11 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
             MemoryHelper.FillWithZeros(context.Memory, recBuffPtr, 0x60);
 
             // Add only the default display to buffer
-            context.Memory.WriteBytes(recBuffPtr, Encoding.ASCII.GetBytes("Default"));
-            context.Memory.WriteInt64(recBuffPtr + 0x40, 0x1L);
-            context.Memory.WriteInt64(recBuffPtr + 0x48, 0x1L);
-            context.Memory.WriteInt64(recBuffPtr + 0x50, 1280L);
-            context.Memory.WriteInt64(recBuffPtr + 0x58, 720L);
+            context.Memory.Write((ulong)recBuffPtr, Encoding.ASCII.GetBytes("Default"));
+            context.Memory.Write((ulong)recBuffPtr + 0x40, 0x1L);
+            context.Memory.Write((ulong)recBuffPtr + 0x48, 0x1L);
+            context.Memory.Write((ulong)recBuffPtr + 0x50, 1280L);
+            context.Memory.Write((ulong)recBuffPtr + 0x58, 720L);
 
             context.ResponseData.Write(1L);
 
@@ -120,7 +124,7 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
             long userId    = context.RequestData.ReadInt64();
             long parcelPtr = context.Request.ReceiveBuff[0].Position;
 
-            IBinder producer = context.Device.System.SurfaceFlinger.OpenLayer(context.Process, layerId);
+            IBinder producer = context.Device.System.SurfaceFlinger.OpenLayer(context.Request.HandleDesc.PId, layerId);
 
             Parcel parcel = new Parcel(0x28, 0x4);
 
@@ -128,7 +132,7 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
 
             ReadOnlySpan<byte> parcelData = parcel.Finish();
 
-            context.Memory.WriteBytes(parcelPtr, parcelData.ToArray());
+            context.Memory.Write((ulong)parcelPtr, parcelData);
 
             context.ResponseData.Write((long)parcelData.Length);
 
@@ -158,7 +162,7 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
             // TODO: support multi display.
             Display disp = _displays.GetData<Display>((int)displayId);
 
-            IBinder producer = context.Device.System.SurfaceFlinger.CreateLayer(context.Process, out long layerId);
+            IBinder producer = context.Device.System.SurfaceFlinger.CreateLayer(0, out long layerId);
 
             Parcel parcel = new Parcel(0x28, 0x4);
 
@@ -166,7 +170,7 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
 
             ReadOnlySpan<byte> parcelData = parcel.Finish();
 
-            context.Memory.WriteBytes(parcelPtr, parcelData.ToArray());
+            context.Memory.Write((ulong)parcelPtr, parcelData);
 
             context.ResponseData.Write(layerId);
             context.ResponseData.Write((long)parcelData.Length);
@@ -190,7 +194,7 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
         public ResultCode SetLayerScalingMode(ServiceCtx context)
         {
             int  scalingMode = context.RequestData.ReadInt32();
-            long unknown     = context.RequestData.ReadInt64();
+            long layerId     = context.RequestData.ReadInt64();
 
             return ResultCode.Success;
         }
@@ -235,18 +239,86 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
             return null;
         }
 
+        [Command(2450)]
+        // GetIndirectLayerImageMap(s64 width, s64 height, u64 handle, nn::applet::AppletResourceUserId, pid) -> (s64, s64, buffer<bytes, 0x46>)
+        public ResultCode GetIndirectLayerImageMap(ServiceCtx context)
+        {
+            // The size of the layer buffer should be an aligned multiple of width * height
+            // because it was created using GetIndirectLayerImageRequiredMemoryInfo as a guide.
+
+            long layerBuffPosition = context.Request.ReceiveBuff[0].Position;
+            long layerBuffSize     = context.Request.ReceiveBuff[0].Size;
+
+            // Fill the layer with zeros.
+            context.Memory.Fill((ulong)layerBuffPosition, (ulong)layerBuffSize, 0x00);
+
+            Logger.Stub?.PrintStub(LogClass.ServiceVi);
+
+            return ResultCode.Success;
+        }
+
+        [Command(2460)]
+        // GetIndirectLayerImageRequiredMemoryInfo(u64 width, u64 height) -> (u64 size, u64 alignment)
+        public ResultCode GetIndirectLayerImageRequiredMemoryInfo(ServiceCtx context)
+        {
+            /*
+            // Doesn't occur in our case.
+            if (sizePtr == null || address_alignmentPtr == null)
+            {
+                return ResultCode.InvalidArguments;
+            }
+            */
+
+            int width  = (int)context.RequestData.ReadUInt64();
+            int height = (int)context.RequestData.ReadUInt64();
+
+            if (height < 0 || width < 0)
+            {
+                return ResultCode.InvalidLayerSize;
+            }
+            else
+            {
+                /*
+                // Doesn't occur in our case.
+                if (!service_initialized)
+                {
+                    return ResultCode.InvalidArguments;
+                }
+                */
+
+                const ulong defaultAlignment = 0x1000;
+                const ulong defaultSize      = 0x20000;
+
+                // NOTE: The official service setup a A8B8G8R8 texture with a linear layout and then query its size.
+                //       As we don't need this texture on the emulator, we can just simplify this logic and directly
+                //       do a linear layout size calculation. (stride * height * bytePerPixel)
+                int   pitch              = BitUtils.AlignUp(BitUtils.DivRoundUp(width * 32, 8), 64);
+                int   memorySize         = pitch * BitUtils.AlignUp(height, 64);
+                ulong requiredMemorySize = (ulong)BitUtils.AlignUp(memorySize, (int)defaultAlignment);
+                ulong size               = (requiredMemorySize + defaultSize - 1) / defaultSize * defaultSize;
+
+                context.ResponseData.Write(size);
+                context.ResponseData.Write(defaultAlignment);
+            }
+
+            return ResultCode.Success;
+        }
+
         [Command(5202)]
         // GetDisplayVsyncEvent(u64) -> handle<copy>
         public ResultCode GetDisplayVSyncEvent(ServiceCtx context)
         {
             string name = GetDisplayName(context);
 
-            if (context.Process.HandleTable.GenerateHandle(context.Device.System.VsyncEvent.ReadableEvent, out int handle) != KernelResult.Success)
+            if (_vsyncEventHandle == 0)
             {
-                throw new InvalidOperationException("Out of handles!");
+                if (context.Process.HandleTable.GenerateHandle(context.Device.System.VsyncEvent.ReadableEvent, out _vsyncEventHandle) != KernelResult.Success)
+                {
+                    throw new InvalidOperationException("Out of handles!");
+                }
             }
 
-            context.Response.HandleDesc = IpcHandleDesc.MakeCopy(handle);
+            context.Response.HandleDesc = IpcHandleDesc.MakeCopy(_vsyncEventHandle);
 
             return ResultCode.Success;
         }

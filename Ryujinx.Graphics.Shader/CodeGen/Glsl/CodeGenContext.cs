@@ -1,3 +1,5 @@
+using Ryujinx.Graphics.Shader.IntermediateRepresentation;
+using Ryujinx.Graphics.Shader.StructuredIr;
 using Ryujinx.Graphics.Shader.Translation;
 using System.Collections.Generic;
 using System.Text;
@@ -8,7 +10,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
     {
         public const string Tab = "    ";
 
+        private readonly StructuredProgramInfo _info;
+
+        public StructuredFunction CurrentFunction { get; set; }
+
         public ShaderConfig Config { get; }
+
+        public bool CbIndexable => _info.UsesCbIndexing;
 
         public List<BufferDescriptor>  CBufferDescriptors { get; }
         public List<BufferDescriptor>  SBufferDescriptors { get; }
@@ -23,8 +31,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
 
         private string _indentation;
 
-        public CodeGenContext(ShaderConfig config)
+        public CodeGenContext(StructuredProgramInfo info, ShaderConfig config)
         {
+            _info = info;
             Config = config;
 
             CBufferDescriptors = new List<BufferDescriptor>();
@@ -73,6 +82,30 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
             UpdateIndentation();
 
             AppendLine("}" + suffix);
+        }
+
+        private int FindDescriptorIndex(List<TextureDescriptor> list, AstTextureOperation texOp)
+        {
+            return list.FindIndex(descriptor =>
+                descriptor.Type == texOp.Type &&
+                descriptor.CbufSlot == texOp.CbufSlot &&
+                descriptor.HandleIndex == texOp.Handle &&
+                descriptor.Format == texOp.Format);
+        }
+
+        public int FindTextureDescriptorIndex(AstTextureOperation texOp)
+        {
+            return FindDescriptorIndex(TextureDescriptors, texOp);
+        }
+
+        public int FindImageDescriptorIndex(AstTextureOperation texOp)
+        {
+            return FindDescriptorIndex(ImageDescriptors, texOp);
+        }
+
+        public StructuredFunction GetFunction(int id)
+        {
+            return _info.Functions[id];
         }
 
         private void UpdateIndentation()

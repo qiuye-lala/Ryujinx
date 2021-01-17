@@ -1,5 +1,4 @@
-﻿using System;
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Collections.Generic;
 
 namespace Ryujinx.Audio
@@ -15,6 +14,7 @@ namespace Ryujinx.Audio
         private ConcurrentQueue<int> _trackIds;
         private ConcurrentQueue<long> _buffers;
         private ConcurrentDictionary<int, ReleaseCallback> _releaseCallbacks;
+        private ulong _playedSampleCount;
 
         public DummyAudioOut()
         {
@@ -30,7 +30,12 @@ namespace Ryujinx.Audio
 
         public PlaybackState GetState(int trackId) => PlaybackState.Stopped;
 
-        public int OpenTrack(int sampleRate, int channels, ReleaseCallback callback)
+        public bool SupportsChannelCount(int channels)
+        {
+            return true;
+        }
+
+        public int OpenHardwareTrack(int sampleRate, int hardwareChannels, int virtualChannels, ReleaseCallback callback)
         {
             if (!_trackIds.TryDequeue(out int trackId))
             {
@@ -67,11 +72,13 @@ namespace Ryujinx.Audio
             return bufferTags.ToArray();
         }
 
-        public void AppendBuffer<T>(int trackID, long bufferTag, T[] buffer) where T : struct
+        public void AppendBuffer<T>(int trackId, long bufferTag, T[] buffer) where T : struct
         {
             _buffers.Enqueue(bufferTag);
 
-            if (_releaseCallbacks.TryGetValue(trackID, out var callback))
+            _playedSampleCount += (ulong)buffer.Length;
+
+            if (_releaseCallbacks.TryGetValue(trackId, out var callback))
             {
                 callback?.Invoke();
             }
@@ -81,9 +88,15 @@ namespace Ryujinx.Audio
 
         public void Stop(int trackId) { }
 
-        public float GetVolume() => _volume;
+        public uint GetBufferCount(int trackId) => (uint)_buffers.Count;
 
-        public void SetVolume(float volume)
+        public ulong GetPlayedSampleCount(int trackId) => _playedSampleCount;
+
+        public bool FlushBuffers(int trackId) => false;
+
+        public float GetVolume(int trackId) => _volume;
+
+        public void SetVolume(int trackId, float volume)
         {
             _volume = volume;
         }

@@ -4,6 +4,7 @@ using ARMeilleure.Memory;
 using ARMeilleure.State;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 
 namespace ARMeilleure.Decoders
 {
@@ -12,27 +13,20 @@ namespace ARMeilleure.Decoders
         // We define a limit on the number of instructions that a function may have,
         // this prevents functions being potentially too large, which would
         // take too long to compile and use too much memory.
-        private const int MaxInstsPerFunction = 5000;
+        private const int MaxInstsPerFunction = 2500;
 
         // For lower code quality translation, we set a lower limit since we're blocking execution.
         private const int MaxInstsPerFunctionLowCq = 500;
 
-        public static Block[] DecodeBasicBlock(MemoryManager memory, ulong address, ExecutionMode mode)
-        {
-            Block block = new Block(address);
-
-            FillBlock(memory, mode, block, ulong.MaxValue);
-
-            return new Block[] { block };
-        }
-
-        public static Block[] DecodeFunction(MemoryManager memory, ulong address, ExecutionMode mode, bool highCq)
+        public static Block[] Decode(IMemoryManager memory, ulong address, ExecutionMode mode, bool highCq, bool singleBlock)
         {
             List<Block> blocks = new List<Block>();
 
             Queue<Block> workQueue = new Queue<Block>();
 
             Dictionary<ulong, Block> visited = new Dictionary<ulong, Block>();
+
+            Debug.Assert(MaxInstsPerFunctionLowCq <= MaxInstsPerFunction);
 
             int opsCount = 0;
 
@@ -42,12 +36,13 @@ namespace ARMeilleure.Decoders
             {
                 if (!visited.TryGetValue(blkAddress, out Block block))
                 {
-                    if (opsCount > instructionLimit || !memory.IsMapped((long)blkAddress))
-                    {
-                        return null;
-                    }
-
                     block = new Block(blkAddress);
+
+                    if ((singleBlock && visited.Count >= 1) || opsCount > instructionLimit || !memory.IsMapped(blkAddress))
+                    {
+                        block.Exit = true;
+                        block.EndAddress = blkAddress;
+                    }
 
                     workQueue.Enqueue(block);
 
@@ -71,6 +66,8 @@ namespace ARMeilleure.Decoders
                         throw new InvalidOperationException("Found duplicate block address on the list.");
                     }
 
+                    currBlock.Exit = false;
+
                     nBlock.Split(currBlock);
 
                     blocks.Insert(nBlkIndex + 1, currBlock);
@@ -78,47 +75,50 @@ namespace ARMeilleure.Decoders
                     continue;
                 }
 
-                // If we have a block after the current one, set the limit address.
-                ulong limitAddress = ulong.MaxValue;
-
-                if (nBlkIndex != blocks.Count)
+                if (!currBlock.Exit)
                 {
-                    Block nBlock = blocks[nBlkIndex];
+                    // If we have a block after the current one, set the limit address.
+                    ulong limitAddress = ulong.MaxValue;
 
-                    int nextIndex = nBlkIndex + 1;
-
-                    if (nBlock.Address < currBlock.Address && nextIndex < blocks.Count)
+                    if (nBlkIndex != blocks.Count)
                     {
-                        limitAddress = blocks[nextIndex].Address;
-                    }
-                    else if (nBlock.Address > currBlock.Address)
-                    {
-                        limitAddress = blocks[nBlkIndex].Address;
-                    }
-                }
+                        Block nBlock = blocks[nBlkIndex];
 
-                FillBlock(memory, mode, currBlock, limitAddress);
+                        int nextIndex = nBlkIndex + 1;
 
-                opsCount += currBlock.OpCodes.Count;
-
-                if (currBlock.OpCodes.Count != 0)
-                {
-                    // Set child blocks. "Branch" is the block the branch instruction
-                    // points to (when taken), "Next" is the block at the next address,
-                    // executed when the branch is not taken. For Unconditional Branches
-                    // (except BL/BLR that are sub calls) or end of executable, Next is null.
-                    OpCode lastOp = currBlock.GetLastOp();
-
-                    bool isCall = IsCall(lastOp);
-
-                    if (lastOp is IOpCodeBImm op && !isCall)
-                    {
-                        currBlock.Branch = GetBlock((ulong)op.Immediate);
+                        if (nBlock.Address < currBlock.Address && nextIndex < blocks.Count)
+                        {
+                            limitAddress = blocks[nextIndex].Address;
+                        }
+                        else if (nBlock.Address > currBlock.Address)
+                        {
+                            limitAddress = blocks[nBlkIndex].Address;
+                        }
                     }
 
-                    if (!IsUnconditionalBranch(lastOp) || isCall)
+                    FillBlock(memory, mode, currBlock, limitAddress);
+
+                    opsCount += currBlock.OpCodes.Count;
+
+                    if (currBlock.OpCodes.Count != 0)
                     {
-                        currBlock.Next = GetBlock(currBlock.EndAddress);
+                        // Set child blocks. "Branch" is the block the branch instruction
+                        // points to (when taken), "Next" is the block at the next address,
+                        // executed when the branch is not taken. For Unconditional Branches
+                        // (except BL/BLR that are sub calls) or end of executable, Next is null.
+                        OpCode lastOp = currBlock.GetLastOp();
+
+                        bool isCall = IsCall(lastOp);
+
+                        if (lastOp is IOpCodeBImm op && !isCall)
+                        {
+                            currBlock.Branch = GetBlock((ulong)op.Immediate);
+                        }
+
+                        if (!IsUnconditionalBranch(lastOp) || isCall)
+                        {
+                            currBlock.Next = GetBlock(currBlock.EndAddress);
+                        }
                     }
                 }
 
@@ -135,9 +135,22 @@ namespace ARMeilleure.Decoders
                 }
             }
 
-            TailCallRemover.RunPass(address, blocks);
+            if (blocks.Count == 1 && blocks[0].OpCodes.Count == 0)
+            {
+                Debug.Assert(blocks[0].Exit);
+                Debug.Assert(blocks[0].Address == blocks[0].EndAddress);
 
-            return blocks.ToArray();
+                throw new InvalidOperationException($"Decoded a single empty exit block. Entry point = 0x{address:X}.");
+            }
+
+            if (!singleBlock)
+            {
+                return TailCallRemover.RunPass(address, blocks);
+            }
+            else
+            {
+                return blocks.ToArray();
+            }
         }
 
         public static bool BinarySearch(List<Block> blocks, ulong address, out int index)
@@ -176,10 +189,10 @@ namespace ARMeilleure.Decoders
         }
 
         private static void FillBlock(
-            MemoryManager memory,
-            ExecutionMode mode,
-            Block         block,
-            ulong         limitAddress)
+            IMemoryManager memory,
+            ExecutionMode  mode,
+            Block          block,
+            ulong          limitAddress)
         {
             ulong address = block.Address;
 
@@ -302,9 +315,9 @@ namespace ARMeilleure.Decoders
                    opCode.Instruction.Name == InstName.Und;
         }
 
-        public static OpCode DecodeOpCode(MemoryManager memory, ulong address, ExecutionMode mode)
+        public static OpCode DecodeOpCode(IMemoryManager memory, ulong address, ExecutionMode mode)
         {
-            int opCode = memory.ReadInt32((long)address);
+            int opCode = memory.Read<int>(address);
 
             InstDescriptor inst;
 
@@ -328,7 +341,7 @@ namespace ARMeilleure.Decoders
 
             if (makeOp != null)
             {
-                return (OpCode)makeOp(inst, address, opCode);
+                return makeOp(inst, address, opCode);
             }
             else
             {

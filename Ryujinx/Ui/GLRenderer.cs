@@ -1,67 +1,82 @@
-﻿using Gdk;
+﻿using ARMeilleure.Translation;
+using ARMeilleure.Translation.PTC;
+using Gdk;
 using OpenTK;
 using OpenTK.Graphics;
 using OpenTK.Graphics.OpenGL;
 using OpenTK.Input;
-using OpenTK.Platform;
+using Ryujinx.Common.Configuration;
+using Ryujinx.Common.Configuration.Hid;
 using Ryujinx.Configuration;
 using Ryujinx.Graphics.OpenGL;
 using Ryujinx.HLE;
 using Ryujinx.HLE.HOS.Services.Hid;
-using Ryujinx.Ui;
+using Ryujinx.Modules.Motion;
+using Ryujinx.Ui.Widgets;
 using System;
 using System.Collections.Generic;
-using System.Text;
 using System.Threading;
 
 namespace Ryujinx.Ui
 {
-    public class GLRenderer : GLWidget
+    public class GlRenderer : GLWidget
     {
-        private const int SwitchPanelWidth = 1280;
+        static GlRenderer()
+        {
+            OpenTK.Graphics.GraphicsContext.ShareContexts = true;
+        }
+
+        private const int SwitchPanelWidth  = 1280;
         private const int SwitchPanelHeight = 720;
-        private const int TargetFps = 60;
+        private const int TargetFps         = 60;
 
         public ManualResetEvent WaitEvent { get; set; }
 
         public static event EventHandler<StatusUpdatedEventArgs> StatusUpdatedEvent;
 
-        public bool IsActive   { get; set; }
-        public bool IsStopped  { get; set; }
-        public bool IsFocused  { get; set; }
+        private bool _isActive;
+        private bool _isStopped;
+        private bool _isFocused;
 
         private double _mouseX;
         private double _mouseY;
-        private bool _mousePressed;
+        private bool   _mousePressed;
 
         private bool _toggleFullscreen;
+        private bool _toggleDockedMode;
 
         private readonly long _ticksPerFrame;
 
         private long _ticks = 0;
 
-        private System.Diagnostics.Stopwatch _chrono;
+        private readonly System.Diagnostics.Stopwatch _chrono;
 
-        private Switch _device;
+        private readonly Switch _device;
 
         private Renderer _renderer;
 
-        private HotkeyButtons _prevHotkeyButtons = 0;
+        private HotkeyButtons _prevHotkeyButtons;
 
-        private Input.NpadController _primaryController;
+        private Client _dsuClient;
 
-        public GLRenderer(Switch device)
+        private GraphicsDebugLevel _glLogLevel;
+
+        private readonly ManualResetEvent _exitEvent;
+
+        public GlRenderer(Switch device, GraphicsDebugLevel glLogLevel)
             : base (GetGraphicsMode(),
             3, 3,
-            GraphicsContextFlags.ForwardCompatible)
+            glLogLevel == GraphicsDebugLevel.None
+            ? GraphicsContextFlags.ForwardCompatible
+            : GraphicsContextFlags.ForwardCompatible | GraphicsContextFlags.Debug)
         {
             WaitEvent = new ManualResetEvent(false);
 
             _device = device;
 
-            this.Initialized += GLRenderer_Initialized;
-            this.Destroyed += GLRenderer_Destroyed;
-            this.ShuttingDown += GLRenderer_ShuttingDown;
+            Initialized  += GLRenderer_Initialized;
+            Destroyed    += GLRenderer_Destroyed;
+            ShuttingDown += GLRenderer_ShuttingDown;
 
             Initialize();
 
@@ -69,59 +84,60 @@ namespace Ryujinx.Ui
 
             _ticksPerFrame = System.Diagnostics.Stopwatch.Frequency / TargetFps;
 
-            _primaryController = new Input.NpadController(ConfigurationState.Instance.Hid.JoystickControls);
+            AddEvents((int)(EventMask.ButtonPressMask
+                          | EventMask.ButtonReleaseMask
+                          | EventMask.PointerMotionMask
+                          | EventMask.KeyPressMask
+                          | EventMask.KeyReleaseMask));
 
-            AddEvents((int)(Gdk.EventMask.ButtonPressMask
-                          | Gdk.EventMask.ButtonReleaseMask
-                          | Gdk.EventMask.PointerMotionMask
-                          | Gdk.EventMask.KeyPressMask
-                          | Gdk.EventMask.KeyReleaseMask));
+            Shown += Renderer_Shown;
 
-            this.Shown += Renderer_Shown;
+            _dsuClient = new Client();
+
+            _glLogLevel = glLogLevel;
+
+            _exitEvent = new ManualResetEvent(false);
         }
 
         private static GraphicsMode GetGraphicsMode()
         {
-            if (Environment.OSVersion.Platform == PlatformID.Unix)
-            {
-                return new GraphicsMode(new ColorFormat(24));
-            }
-
-            return new GraphicsMode(new ColorFormat());
+            return Environment.OSVersion.Platform == PlatformID.Unix ? new GraphicsMode(new ColorFormat(24)) : new GraphicsMode(new ColorFormat());
         }
 
         private void GLRenderer_ShuttingDown(object sender, EventArgs args)
         {
             _device.DisposeGpu();
+            _dsuClient?.Dispose();
         }
 
         private void Parent_FocusOutEvent(object o, Gtk.FocusOutEventArgs args)
         {
-            IsFocused = false;
+            _isFocused = false;
         }
 
         private void Parent_FocusInEvent(object o, Gtk.FocusInEventArgs args)
         {
-            IsFocused = true;
+            _isFocused = true;
         }
 
         private void GLRenderer_Destroyed(object sender, EventArgs e)
         {
+            _dsuClient?.Dispose();
             Dispose();
         }
 
         protected void Renderer_Shown(object sender, EventArgs e)
         {
-            IsFocused = this.ParentWindow.State.HasFlag(Gdk.WindowState.Focused);
+            _isFocused = this.ParentWindow.State.HasFlag(Gdk.WindowState.Focused);
         }
 
         public void HandleScreenState(KeyboardState keyboard)
         {
-            bool toggleFullscreen = keyboard.IsKeyDown(OpenTK.Input.Key.F11)
+            bool toggleFullscreen =  keyboard.IsKeyDown(OpenTK.Input.Key.F11)
                                 || ((keyboard.IsKeyDown(OpenTK.Input.Key.AltLeft)
                                 ||   keyboard.IsKeyDown(OpenTK.Input.Key.AltRight))
                                 &&   keyboard.IsKeyDown(OpenTK.Input.Key.Enter))
-                                || keyboard.IsKeyDown(OpenTK.Input.Key.Escape);
+                                ||   keyboard.IsKeyDown(OpenTK.Input.Key.Escape);
 
             bool fullScreenToggled = ParentWindow.State.HasFlag(Gdk.WindowState.Fullscreen);
 
@@ -138,7 +154,7 @@ namespace Ryujinx.Ui
                     {
                         if (keyboard.IsKeyDown(OpenTK.Input.Key.Escape))
                         {
-                            if (GtkDialog.CreateExitDialog())
+                            if (!ConfigurationState.Instance.ShowConfirmExit || GtkDialog.CreateExitDialog())
                             {
                                 Exit();
                             }
@@ -153,6 +169,19 @@ namespace Ryujinx.Ui
             }
 
             _toggleFullscreen = toggleFullscreen;
+
+            bool toggleDockedMode = keyboard.IsKeyDown(OpenTK.Input.Key.F9);
+
+            if (toggleDockedMode != _toggleDockedMode)
+            {
+                if (toggleDockedMode)
+                {
+                    ConfigurationState.Instance.System.EnableDockedMode.Value =
+                        !ConfigurationState.Instance.System.EnableDockedMode.Value;
+                }
+            }
+
+            _toggleDockedMode = toggleDockedMode;
         }
 
         private void GLRenderer_Initialized(object sender, EventArgs e)
@@ -165,7 +194,7 @@ namespace Ryujinx.Ui
 
         protected override bool OnConfigureEvent(EventConfigure evnt)
         {
-            var result = base.OnConfigureEvent(evnt);
+            bool result = base.OnConfigureEvent(evnt);
 
             Gdk.Monitor monitor = Display.GetMonitorAtWindow(Window);
 
@@ -180,27 +209,27 @@ namespace Ryujinx.Ui
 
             _chrono.Restart();
 
-            IsActive = true;
+            _isActive = true;
 
             Gtk.Window parent = this.Toplevel as Gtk.Window;
 
-            parent.FocusInEvent += Parent_FocusInEvent;
+            parent.FocusInEvent  += Parent_FocusInEvent;
             parent.FocusOutEvent += Parent_FocusOutEvent;
 
             Gtk.Application.Invoke(delegate
             {
                 parent.Present();
 
-                string titleNameSection = string.IsNullOrWhiteSpace(_device.System.TitleName) ? string.Empty
-                    : $" - {_device.System.TitleName}";
+                string titleNameSection = string.IsNullOrWhiteSpace(_device.Application.TitleName) ? string.Empty
+                    : $" - {_device.Application.TitleName}";
 
-                string titleVersionSection = string.IsNullOrWhiteSpace(_device.System.TitleVersionString) ? string.Empty
-                    : $" v{_device.System.TitleVersionString}";
+                string titleVersionSection = string.IsNullOrWhiteSpace(_device.Application.DisplayVersion) ? string.Empty
+                    : $" v{_device.Application.DisplayVersion}";
 
-                string titleIdSection = string.IsNullOrWhiteSpace(_device.System.TitleIdText) ? string.Empty
-                    : $" ({_device.System.TitleIdText.ToUpper()})";
+                string titleIdSection = string.IsNullOrWhiteSpace(_device.Application.TitleIdText) ? string.Empty
+                    : $" ({_device.Application.TitleIdText.ToUpper()})";
 
-                string titleArchSection = _device.System.TitleIs64Bit ? " (64-bit)" : " (32-bit)";
+                string titleArchSection = _device.Application.TitleIs64Bit ? " (64-bit)" : " (32-bit)";
 
                 parent.Title = $"Ryujinx {Program.Version}{titleNameSection}{titleVersionSection}{titleIdSection}{titleArchSection}";
             });
@@ -211,11 +240,37 @@ namespace Ryujinx.Ui
             };
             renderLoopThread.Start();
 
+            Thread nvStutterWorkaround = new Thread(NVStutterWorkaround)
+            {
+                Name = "GUI.NVStutterWorkaround"
+            };
+            nvStutterWorkaround.Start();
+
             MainLoop();
 
             renderLoopThread.Join();
+            nvStutterWorkaround.Join();
 
             Exit();
+        }
+
+        private void NVStutterWorkaround()
+        {
+            while (_isActive)
+            {
+                // When NVIDIA Threaded Optimization is on, the driver will snapshot all threads in the system whenever the application creates any new ones.
+                // The ThreadPool has something called a "GateThread" which terminates itself after some inactivity.
+                // However, it immediately starts up again, since the rules regarding when to terminate and when to start differ.
+                // This creates a new thread every second or so.
+                // The main problem with this is that the thread snapshot can take 70ms, is on the OpenGL thread and will delay rendering any graphics.
+                // This is a little over budget on a frame time of 16ms, so creates a large stutter.
+                // The solution is to keep the ThreadPool active so that it never has a reason to terminate the GateThread.
+
+                // TODO: This should be removed when the issue with the GateThread is resolved.
+
+                ThreadPool.QueueUserWorkItem((state) => { });
+                Thread.Sleep(300);
+            }
         }
 
         protected override bool OnButtonPressEvent(EventButton evnt)
@@ -290,20 +345,25 @@ namespace Ryujinx.Ui
 
         public void Exit()
         {
-            if (IsStopped)
+            _dsuClient?.Dispose();
+
+            if (_isStopped)
             {
                 return;
             }
 
-            IsStopped = true;
-            IsActive  = false;
+            _isStopped = true;
+            _isActive  = false;
+
+            _exitEvent.WaitOne();
+            _exitEvent.Dispose();
         }
 
         public void Initialize()
         {
             if (!(_device.Gpu.Renderer is Renderer))
             {
-                throw new NotSupportedException($"GPU renderer must be an OpenGL renderer when using GLRenderer!");
+                throw new NotSupportedException($"GPU renderer must be an OpenGL renderer when using {typeof(Renderer).Name}!");
             }
 
             _renderer = (Renderer)_device.Gpu.Renderer;
@@ -312,18 +372,24 @@ namespace Ryujinx.Ui
         public void Render()
         {
             // First take exclusivity on the OpenGL context.
+            _renderer.InitializeBackgroundContext(GraphicsContext);
+            Gtk.Window parent = Toplevel as Gtk.Window;
+            parent.Present();
             GraphicsContext.MakeCurrent(WindowInfo);
 
-            _renderer.Initialize();
+            _device.Gpu.Renderer.Initialize(_glLogLevel);
 
             // Make sure the first frame is not transparent.
             GL.ClearColor(OpenTK.Color.Black);
             GL.Clear(ClearBufferMask.ColorBufferBit);
             SwapBuffers();
 
-            while (IsActive)
+            _device.Gpu.InitializeShaderCache();
+            Translator.IsReadyForTranslation.Set();
+
+            while (_isActive)
             {
-                if (IsStopped)
+                if (_isStopped)
                 {
                     return;
                 }
@@ -334,20 +400,32 @@ namespace Ryujinx.Ui
 
                 if (_device.WaitFifo())
                 {
+                    _device.Statistics.RecordFifoStart();
                     _device.ProcessFrame();
+                    _device.Statistics.RecordFifoEnd();
+                }
+
+                while (_device.ConsumeFrameAvailable())
+                {
+                    _device.PresentFrame(SwapBuffers);
                 }
 
                 if (_ticks >= _ticksPerFrame)
                 {
-                    _device.PresentFrame(SwapBuffers);
-
-                    _device.Statistics.RecordSystemFrameTime();
+                    string dockedMode = ConfigurationState.Instance.System.EnableDockedMode ? "Docked" : "Handheld";
+                    float scale = Graphics.Gpu.GraphicsConfig.ResScale;
+                    if (scale != 1)
+                    {
+                        dockedMode += $" ({scale}x)";
+                    }
 
                     StatusUpdatedEvent?.Invoke(this, new StatusUpdatedEventArgs(
-                        _device.EnableDeviceVsync, 
-                        $"Host: {_device.Statistics.GetSystemFrameRate():00.00} FPS", 
+                        _device.EnableDeviceVsync,
+                        dockedMode,
+                        ConfigurationState.Instance.Graphics.AspectRatio.Value.ToText(),
                         $"Game: {_device.Statistics.GetGameFrameRate():00.00} FPS",
-                        $"GPU: {_renderer.GpuVendor}"));
+                        $"FIFO: {_device.Statistics.GetFifoPercent():0.00} %",
+                        $"GPU:  {_renderer.GpuVendor}"));
 
                     _ticks = Math.Min(_ticks - _ticksPerFrame, _ticksPerFrame);
                 }
@@ -361,116 +439,218 @@ namespace Ryujinx.Ui
 
         public void MainLoop()
         {
-            while (IsActive)
+            while (_isActive)
             {
                 UpdateFrame();
 
                 // Polling becomes expensive if it's not slept
                 Thread.Sleep(1);
             }
+
+            _exitEvent.Set();
         }
 
         private bool UpdateFrame()
         {
-            if (!IsActive)
+            if (!_isActive)
             {
                 return true;
             }
 
-            if (IsStopped)
+            if (_isStopped)
             {
                 return false;
             }
 
-            HotkeyButtons currentHotkeyButtons = 0;
-            ControllerKeys currentButton = 0;
-            JoystickPosition leftJoystick;
-            JoystickPosition rightJoystick;
-            KeyboardInput? hidKeyboard = null;
-
-            int leftJoystickDx = 0;
-            int leftJoystickDy = 0;
-            int rightJoystickDx = 0;
-            int rightJoystickDy = 0;
-
-            // OpenTK always captures keyboard events, even if out of focus, so check if window is focused.
-            if (IsFocused)
+            if (_isFocused)
             {
-                KeyboardState keyboard = OpenTK.Input.Keyboard.GetState();
-
                 Gtk.Application.Invoke(delegate
                 {
+                    KeyboardState keyboard = OpenTK.Input.Keyboard.GetState();
+
                     HandleScreenState(keyboard);
+
+                    if (keyboard.IsKeyDown(OpenTK.Input.Key.Delete))
+                    {
+                        if (!ParentWindow.State.HasFlag(Gdk.WindowState.Fullscreen))
+                        {
+                            Ptc.Continue();
+                        }
+                    }
                 });
+            }
 
-                // Normal Input
-                currentHotkeyButtons = KeyboardControls.GetHotkeyButtons(ConfigurationState.Instance.Hid.KeyboardControls, keyboard);
-                currentButton = KeyboardControls.GetButtons(ConfigurationState.Instance.Hid.KeyboardControls, keyboard);
+            List<GamepadInput> gamepadInputs = new List<GamepadInput>(NpadDevices.MaxControllers);
+            List<SixAxisInput> motionInputs  = new List<SixAxisInput>(NpadDevices.MaxControllers);
 
-                if (ConfigurationState.Instance.Hid.EnableKeyboard)
+            MotionDevice motionDevice = new MotionDevice(_dsuClient);
+
+            foreach (InputConfig inputConfig in ConfigurationState.Instance.Hid.InputConfig.Value)
+            {
+                ControllerKeys   currentButton = 0;
+                JoystickPosition leftJoystick  = new JoystickPosition();
+                JoystickPosition rightJoystick = new JoystickPosition();
+                KeyboardInput?   hidKeyboard   = null;
+
+                int leftJoystickDx  = 0;
+                int leftJoystickDy  = 0;
+                int rightJoystickDx = 0;
+                int rightJoystickDy = 0;
+
+                if (inputConfig.EnableMotion)
                 {
-                    hidKeyboard = KeyboardControls.GetKeysDown(ConfigurationState.Instance.Hid.KeyboardControls, keyboard);
+                    motionDevice.RegisterController(inputConfig.PlayerIndex);
                 }
 
-                (leftJoystickDx, leftJoystickDy) = KeyboardControls.GetLeftStick(ConfigurationState.Instance.Hid.KeyboardControls, keyboard);
-                (rightJoystickDx, rightJoystickDy) = KeyboardControls.GetRightStick(ConfigurationState.Instance.Hid.KeyboardControls, keyboard);
-            }
-
-            if (!hidKeyboard.HasValue)
-            {
-                hidKeyboard = new KeyboardInput
+                if (inputConfig is KeyboardConfig keyboardConfig)
                 {
-                    Modifier = 0,
-                    Keys = new int[0x8]
+                    if (_isFocused)
+                    {
+                        // Keyboard Input
+                        KeyboardController keyboardController = new KeyboardController(keyboardConfig);
+
+                        currentButton = keyboardController.GetButtons();
+
+                        (leftJoystickDx,  leftJoystickDy)  = keyboardController.GetLeftStick();
+                        (rightJoystickDx, rightJoystickDy) = keyboardController.GetRightStick();
+
+                        leftJoystick = new JoystickPosition
+                        {
+                            Dx = leftJoystickDx,
+                            Dy = leftJoystickDy
+                        };
+
+                        rightJoystick = new JoystickPosition
+                        {
+                            Dx = rightJoystickDx,
+                            Dy = rightJoystickDy
+                        };
+
+                        if (ConfigurationState.Instance.Hid.EnableKeyboard)
+                        {
+                            hidKeyboard = keyboardController.GetKeysDown();
+                        }
+
+                        if (!hidKeyboard.HasValue)
+                        {
+                            hidKeyboard = new KeyboardInput
+                            {
+                                Modifier = 0,
+                                Keys     = new int[0x8]
+                            };
+                        }
+
+                        if (ConfigurationState.Instance.Hid.EnableKeyboard)
+                        {
+                            _device.Hid.Keyboard.Update(hidKeyboard.Value);
+                        }
+                    }
+                }
+                else if (inputConfig is Common.Configuration.Hid.ControllerConfig controllerConfig)
+                {
+                    // Controller Input
+                    JoystickController joystickController = new JoystickController(controllerConfig);
+
+                    currentButton |= joystickController.GetButtons();
+
+                    (leftJoystickDx,  leftJoystickDy)  = joystickController.GetLeftStick();
+                    (rightJoystickDx, rightJoystickDy) = joystickController.GetRightStick();
+
+                    leftJoystick = new JoystickPosition
+                    {
+                        Dx = controllerConfig.LeftJoycon.InvertStickX ? -leftJoystickDx : leftJoystickDx,
+                        Dy = controllerConfig.LeftJoycon.InvertStickY ? -leftJoystickDy : leftJoystickDy
+                    };
+
+                    rightJoystick = new JoystickPosition
+                    {
+                        Dx = controllerConfig.RightJoycon.InvertStickX ? -rightJoystickDx : rightJoystickDx,
+                        Dy = controllerConfig.RightJoycon.InvertStickY ? -rightJoystickDy : rightJoystickDy
+                    };
+                }
+
+                currentButton |= _device.Hid.UpdateStickButtons(leftJoystick, rightJoystick);
+
+                motionDevice.Poll(inputConfig, inputConfig.Slot);
+
+                SixAxisInput sixAxisInput = new SixAxisInput()
+                {
+                    PlayerId      = (HLE.HOS.Services.Hid.PlayerIndex)inputConfig.PlayerIndex,
+                    Accelerometer = motionDevice.Accelerometer,
+                    Gyroscope     = motionDevice.Gyroscope,
+                    Rotation      = motionDevice.Rotation,
+                    Orientation   = motionDevice.Orientation
                 };
+
+                motionInputs.Add(sixAxisInput);
+
+                gamepadInputs.Add(new GamepadInput
+                {
+                    PlayerId = (HLE.HOS.Services.Hid.PlayerIndex)inputConfig.PlayerIndex,
+                    Buttons  = currentButton,
+                    LStick   = leftJoystick,
+                    RStick   = rightJoystick
+                });
+
+                if (inputConfig.ControllerType == Common.Configuration.Hid.ControllerType.JoyconPair)
+                {
+                    if (!inputConfig.MirrorInput)
+                    {
+                        motionDevice.Poll(inputConfig, inputConfig.AltSlot);
+
+                        sixAxisInput = new SixAxisInput()
+                        {
+                            PlayerId      = (HLE.HOS.Services.Hid.PlayerIndex)inputConfig.PlayerIndex,
+                            Accelerometer = motionDevice.Accelerometer,
+                            Gyroscope     = motionDevice.Gyroscope,
+                            Rotation      = motionDevice.Rotation,
+                            Orientation   = motionDevice.Orientation
+                        };
+                    }
+
+                    motionInputs.Add(sixAxisInput);
+                }
             }
 
-            currentButton |= _primaryController.GetButtons();
+            _device.Hid.Npads.Update(gamepadInputs);
+            _device.Hid.Npads.UpdateSixAxis(motionInputs);
 
-            // Keyboard has priority stick-wise
-            if (leftJoystickDx == 0 && leftJoystickDy == 0)
+            if(_isFocused)
             {
-                (leftJoystickDx, leftJoystickDy) = _primaryController.GetLeftStick();
+                // Hotkeys
+                HotkeyButtons currentHotkeyButtons = KeyboardController.GetHotkeyButtons(OpenTK.Input.Keyboard.GetState());
+
+                if (currentHotkeyButtons.HasFlag(HotkeyButtons.ToggleVSync) &&
+                    !_prevHotkeyButtons.HasFlag(HotkeyButtons.ToggleVSync))
+                {
+                    _device.EnableDeviceVsync = !_device.EnableDeviceVsync;
+                }
+
+                _prevHotkeyButtons = currentHotkeyButtons;
             }
 
-            if (rightJoystickDx == 0 && rightJoystickDy == 0)
-            {
-                (rightJoystickDx, rightJoystickDy) = _primaryController.GetRightStick();
-            }
-
-            leftJoystick = new JoystickPosition
-            {
-                Dx = leftJoystickDx,
-                Dy = leftJoystickDy
-            };
-
-            rightJoystick = new JoystickPosition
-            {
-                Dx = rightJoystickDx,
-                Dy = rightJoystickDy
-            };
-
-            currentButton |= _device.Hid.UpdateStickButtons(leftJoystick, rightJoystick);
-
+            //Touchscreen
             bool hasTouch = false;
 
             // Get screen touch position from left mouse click
             // OpenTK always captures mouse events, even if out of focus, so check if window is focused.
-            if (IsFocused && _mousePressed)
+            if (_isFocused && _mousePressed)
             {
-                int screenWidth = AllocatedWidth;
+                float aspectWidth = SwitchPanelHeight * ConfigurationState.Instance.Graphics.AspectRatio.Value.ToFloat();
+
+                int screenWidth  = AllocatedWidth;
                 int screenHeight = AllocatedHeight;
 
-                if (AllocatedWidth > (AllocatedHeight * SwitchPanelWidth) / SwitchPanelHeight)
+                if (AllocatedWidth > AllocatedHeight * aspectWidth / SwitchPanelHeight)
                 {
-                    screenWidth = (AllocatedHeight * SwitchPanelWidth) / SwitchPanelHeight;
+                    screenWidth = (int)(AllocatedHeight * aspectWidth) / SwitchPanelHeight;
                 }
                 else
                 {
-                    screenHeight = (AllocatedWidth * SwitchPanelHeight) / SwitchPanelWidth;
+                    screenHeight = (AllocatedWidth * SwitchPanelHeight) / (int)aspectWidth;
                 }
 
-                int startX = (AllocatedWidth - screenWidth) >> 1;
+                int startX = (AllocatedWidth  - screenWidth)  >> 1;
                 int startY = (AllocatedHeight - screenHeight) >> 1;
 
                 int endX = startX + screenWidth;
@@ -485,7 +665,7 @@ namespace Ryujinx.Ui
                     int screenMouseX = (int)_mouseX - startX;
                     int screenMouseY = (int)_mouseY - startY;
 
-                    int mX = (screenMouseX * SwitchPanelWidth) / screenWidth;
+                    int mX = (screenMouseX * (int)aspectWidth)  / screenWidth;
                     int mY = (screenMouseY * SwitchPanelHeight) / screenHeight;
 
                     TouchPoint currentPoint = new TouchPoint
@@ -496,7 +676,7 @@ namespace Ryujinx.Ui
                         // Placeholder values till more data is acquired
                         DiameterX = 10,
                         DiameterY = 10,
-                        Angle = 90
+                        Angle     = 90
                     };
 
                     hasTouch = true;
@@ -510,29 +690,7 @@ namespace Ryujinx.Ui
                 _device.Hid.Touchscreen.Update();
             }
 
-            if (ConfigurationState.Instance.Hid.EnableKeyboard && hidKeyboard.HasValue)
-            {
-                _device.Hid.Keyboard.Update(hidKeyboard.Value);
-            }
-
             _device.Hid.DebugPad.Update();
-
-            _device.Hid.Npads.SetGamepadsInput(new GamepadInput
-            {
-                PlayerId = PlayerIndex.Auto,
-                Buttons = currentButton,
-                LStick = leftJoystick,
-                RStick = rightJoystick
-            });
-
-            // Toggle vsync
-            if (currentHotkeyButtons.HasFlag(HotkeyButtons.ToggleVSync) &&
-                !_prevHotkeyButtons.HasFlag(HotkeyButtons.ToggleVSync))
-            {
-                _device.EnableDeviceVsync = !_device.EnableDeviceVsync;
-            }
-
-            _prevHotkeyButtons = currentHotkeyButtons;
 
             return true;
         }

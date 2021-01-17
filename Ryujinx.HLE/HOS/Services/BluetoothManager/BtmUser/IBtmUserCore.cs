@@ -29,14 +29,14 @@ namespace Ryujinx.HLE.HOS.Services.BluetoothManager.BtmUser
 
             if (_bleScanEventHandle == 0)
             {
-                _bleScanEvent = new KEvent(context.Device.System);
+                _bleScanEvent = new KEvent(context.Device.System.KernelContext);
 
                 result = context.Process.HandleTable.GenerateHandle(_bleScanEvent.ReadableEvent, out _bleScanEventHandle);
 
                 if (result != KernelResult.Success)
                 {
                     // NOTE: We use a Logging instead of an exception because the call return a boolean if succeed or not.
-                    Logger.PrintError(LogClass.ServiceBsd, "Out of handles!");
+                    Logger.Error?.Print(LogClass.ServiceBsd, "Out of handles!");
                 }
             }
 
@@ -55,14 +55,14 @@ namespace Ryujinx.HLE.HOS.Services.BluetoothManager.BtmUser
 
             if (_bleConnectionEventHandle == 0)
             {
-                _bleConnectionEvent = new KEvent(context.Device.System);
+                _bleConnectionEvent = new KEvent(context.Device.System.KernelContext);
 
                 result = context.Process.HandleTable.GenerateHandle(_bleConnectionEvent.ReadableEvent, out _bleConnectionEventHandle);
 
                 if (result != KernelResult.Success)
                 {
                     // NOTE: We use a Logging instead of an exception because the call return a boolean if succeed or not.
-                    Logger.PrintError(LogClass.ServiceBsd, "Out of handles!");
+                    Logger.Error?.Print(LogClass.ServiceBsd, "Out of handles!");
                 }
             }
 
@@ -81,14 +81,14 @@ namespace Ryujinx.HLE.HOS.Services.BluetoothManager.BtmUser
 
             if (_bleServiceDiscoveryEventHandle == 0)
             {
-                _bleServiceDiscoveryEvent = new KEvent(context.Device.System);
+                _bleServiceDiscoveryEvent = new KEvent(context.Device.System.KernelContext);
 
                 result = context.Process.HandleTable.GenerateHandle(_bleServiceDiscoveryEvent.ReadableEvent, out _bleServiceDiscoveryEventHandle);
 
                 if (result != KernelResult.Success)
                 {
                     // NOTE: We use a Logging instead of an exception because the call return a boolean if succeed or not.
-                    Logger.PrintError(LogClass.ServiceBsd, "Out of handles!");
+                    Logger.Error?.Print(LogClass.ServiceBsd, "Out of handles!");
                 }
             }
 
@@ -107,14 +107,14 @@ namespace Ryujinx.HLE.HOS.Services.BluetoothManager.BtmUser
 
             if (_bleMtuConfigEventHandle == 0)
             {
-                _bleMtuConfigEvent = new KEvent(context.Device.System);
+                _bleMtuConfigEvent = new KEvent(context.Device.System.KernelContext);
 
                 result = context.Process.HandleTable.GenerateHandle(_bleMtuConfigEvent.ReadableEvent, out _bleMtuConfigEventHandle);
 
                 if (result != KernelResult.Success)
                 {
                     // NOTE: We use a Logging instead of an exception because the call return a boolean if succeed or not.
-                    Logger.PrintError(LogClass.ServiceBsd, "Out of handles!");
+                    Logger.Error?.Print(LogClass.ServiceBsd, "Out of handles!");
                 }
             }
 

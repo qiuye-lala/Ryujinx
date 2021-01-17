@@ -14,7 +14,7 @@ namespace ARMeilleure.CodeGen.Optimizations
                 return;
             }
 
-            if (!AreAllSourcesConstant(operation))
+            if (!AreAllSourcesConstantAndCFEnabled(operation))
             {
                 return;
             }
@@ -75,6 +75,13 @@ namespace ARMeilleure.CodeGen.Optimizations
                     else if (type == OperandType.I64)
                     {
                         EvaluateBinaryI64(operation, (x, y) => x | y);
+                    }
+                    break;
+
+                case Instruction.ConvertI64ToI32:
+                    if (type == OperandType.I32)
+                    {
+                        EvaluateUnaryI32(operation, (x) => x);
                     }
                     break;
 
@@ -199,6 +206,39 @@ namespace ARMeilleure.CodeGen.Optimizations
                     }
                     break;
 
+                case Instruction.ZeroExtend16:
+                    if (type == OperandType.I32)
+                    {
+                        EvaluateUnaryI32(operation, (x) => (ushort)x);
+                    }
+                    else if (type == OperandType.I64)
+                    {
+                        EvaluateUnaryI64(operation, (x) => (ushort)x);
+                    }
+                    break;
+
+                case Instruction.ZeroExtend32:
+                    if (type == OperandType.I32)
+                    {
+                        EvaluateUnaryI32(operation, (x) => x);
+                    }
+                    else if (type == OperandType.I64)
+                    {
+                        EvaluateUnaryI64(operation, (x) => (uint)x);
+                    }
+                    break;
+
+                case Instruction.ZeroExtend8:
+                    if (type == OperandType.I32)
+                    {
+                        EvaluateUnaryI32(operation, (x) => (byte)x);
+                    }
+                    else if (type == OperandType.I64)
+                    {
+                        EvaluateUnaryI64(operation, (x) => (byte)x);
+                    }
+                    break;
+
                 case Instruction.Subtract:
                     if (type == OperandType.I32)
                     {
@@ -212,11 +252,13 @@ namespace ARMeilleure.CodeGen.Optimizations
             }
         }
 
-        private static bool AreAllSourcesConstant(Operation operation)
+        private static bool AreAllSourcesConstantAndCFEnabled(Operation operation)
         {
             for (int index = 0; index < operation.SourcesCount; index++)
             {
-                if (operation.GetSource(index).Kind != OperandKind.Constant)
+                Operand srcOp = operation.GetSource(index);
+
+                if (srcOp.Kind != OperandKind.Constant || srcOp.Relocatable)
                 {
                     return false;
                 }

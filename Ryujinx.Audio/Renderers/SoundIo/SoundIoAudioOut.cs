@@ -1,6 +1,5 @@
 ﻿using Ryujinx.Audio.SoundIo;
 using SoundIOSharp;
-using System;
 using System.Collections.Generic;
 
 namespace Ryujinx.Audio
@@ -14,16 +13,6 @@ namespace Ryujinx.Audio
         /// The maximum amount of tracks we can issue simultaneously
         /// </summary>
         private const int MaximumTracks = 256;
-
-        /// <summary>
-        /// The volume of audio renderer
-        /// </summary>
-        private float _volume = 1.0f;
-
-        /// <summary>
-        /// True if the volume of audio renderer have changed
-        /// </summary>
-        private bool _volumeChanged;
 
         /// <summary>
         /// The <see cref="SoundIO"/> audio context
@@ -65,14 +54,20 @@ namespace Ryujinx.Audio
             _trackPool   = new SoundIoAudioTrackPool(_audioContext, _audioDevice, MaximumTracks);
         }
 
+        public bool SupportsChannelCount(int channels)
+        {
+            return _audioDevice.SupportsChannelCount(channels);
+        }
+
         /// <summary>
         /// Creates a new audio track with the specified parameters
         /// </summary>
         /// <param name="sampleRate">The requested sample rate</param>
-        /// <param name="channels">The requested channels</param>
+        /// <param name="hardwareChannels">The requested hardware channels</param>
+        /// <param name="virtualChannels">The requested virtual channels</param>
         /// <param name="callback">A <see cref="ReleaseCallback" /> that represents the delegate to invoke when a buffer has been released by the audio track</param>
         /// <returns>The created track's Track ID</returns>
-        public int OpenTrack(int sampleRate, int channels, ReleaseCallback callback)
+        public int OpenHardwareTrack(int sampleRate, int hardwareChannels, int virtualChannels, ReleaseCallback callback)
         {
             if (!_trackPool.TryGet(out SoundIoAudioTrack track))
             {
@@ -80,7 +75,7 @@ namespace Ryujinx.Audio
             }
 
             // Open the output. We currently only support 16-bit signed LE
-            track.Open(sampleRate, channels, callback, SoundIOFormat.S16LE);
+            track.Open(sampleRate, hardwareChannels, virtualChannels, callback, SoundIOFormat.S16LE);
 
             return track.TrackID;
         }
@@ -149,14 +144,7 @@ namespace Ryujinx.Audio
         public void AppendBuffer<T>(int trackId, long bufferTag, T[] buffer) where T : struct
         {
             if (_trackPool.TryGet(trackId, out SoundIoAudioTrack track))
-            {
-                if (_volumeChanged)
-                {
-                    track.AudioStream.SetVolume(_volume);
-
-                    _volumeChanged = false;
-                }
-                    
+            {   
                 track.AppendBuffer(bufferTag, buffer);
             }
         }
@@ -186,21 +174,70 @@ namespace Ryujinx.Audio
         }
 
         /// <summary>
-        /// Get playback volume
+        /// Get track buffer count
         /// </summary>
-        public float GetVolume() => _volume;
+        /// <param name="trackId">The ID of the track to get buffer count</param>
+        public uint GetBufferCount(int trackId)
+        {
+            if (_trackPool.TryGet(trackId, out SoundIoAudioTrack track))
+            {
+                return track.BufferCount;
+            }
+
+            return 0;
+        }
 
         /// <summary>
-        /// Set playback volume
+        /// Get track played sample count
+        /// </summary>
+        /// <param name="trackId">The ID of the track to get played sample</param>
+        public ulong GetPlayedSampleCount(int trackId)
+        {
+            if (_trackPool.TryGet(trackId, out SoundIoAudioTrack track))
+            {
+                return track.PlayedSampleCount;
+            }
+
+            return 0;
+        }
+
+        /// <summary>
+        /// Flush all track buffers
+        /// </summary>
+        /// <param name="trackId">The ID of the track to flush</param>
+        public bool FlushBuffers(int trackId)
+        {
+            if (_trackPool.TryGet(trackId, out SoundIoAudioTrack track))
+            {
+                return track.FlushBuffers();
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Set track volume
         /// </summary>
         /// <param name="volume">The volume of the playback</param>
-        public void SetVolume(float volume)
+        public void SetVolume(int trackId, float volume)
         {
-            if (!_volumeChanged)
+            if (_trackPool.TryGet(trackId, out SoundIoAudioTrack track))
             {
-                _volume        = volume;
-                _volumeChanged = true;
+                track.AudioStream.SetVolume(volume);
             }
+        }
+
+        /// <summary>
+        /// Get track volume
+        /// </summary>
+        public float GetVolume(int trackId)
+        {
+            if (_trackPool.TryGet(trackId, out SoundIoAudioTrack track))
+            {
+                return track.AudioStream.Volume;
+            }
+
+            return 1.0f;
         }
 
         /// <summary>

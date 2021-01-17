@@ -44,7 +44,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Nsd
             {
                 byte[] settingNameBuffer = Encoding.UTF8.GetBytes(settingName + '\0');
 
-                context.Memory.WriteBytes(outputPosition, settingNameBuffer);
+                context.Memory.Write((ulong)outputPosition, settingNameBuffer);
             }
 
             return result;
@@ -62,7 +62,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Nsd
             {
                 byte[] identifierBuffer = Encoding.UTF8.GetBytes(identifier + '\0');
 
-                context.Memory.WriteBytes(outputPosition, identifierBuffer);
+                context.Memory.Write((ulong)outputPosition, identifierBuffer);
             }
 
             return result;
@@ -118,14 +118,14 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Nsd
         // ImportSettings(u32, buffer<unknown, 5>) -> buffer<unknown, 6>
         public ResultCode ImportSettings(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(15)]
         // Unknown(bytes<1>)
         public ResultCode Unknown(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(20)]
@@ -138,7 +138,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Nsd
 
             byte[] resolvedAddressBuffer = Encoding.UTF8.GetBytes(resolvedAddress + '\0');
 
-            context.Memory.WriteBytes(outputPosition, resolvedAddressBuffer);
+            context.Memory.Write((ulong)outputPosition, resolvedAddressBuffer);
 
             return result;
         }
@@ -153,7 +153,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Nsd
 
             byte[] resolvedAddressBuffer = Encoding.UTF8.GetBytes(resolvedAddress + '\0');
 
-            context.Memory.WriteBytes(outputPosition, resolvedAddressBuffer);
+            context.Memory.Write((ulong)outputPosition, resolvedAddressBuffer);
 
             context.ResponseData.Write((int)errorCode);
 
@@ -164,49 +164,49 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Nsd
         // GetNasServiceSetting(buffer<unknown<0x10>, 0x15>) -> buffer<unknown<0x108>, 0x16>
         public ResultCode GetNasServiceSetting(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(31)]
         // GetNasServiceSettingEx(buffer<unknown<0x10>, 0x15>) -> (u32, buffer<unknown<0x108>, 0x16>)
         public ResultCode GetNasServiceSettingEx(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(40)]
         // GetNasRequestFqdn() -> buffer<unknown<0x100>, 0x16>
         public ResultCode GetNasRequestFqdn(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(41)]
         // GetNasRequestFqdnEx() -> (u32, buffer<unknown<0x100>, 0x16>)
         public ResultCode GetNasRequestFqdnEx(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(42)]
         // GetNasApiFqdn() -> buffer<unknown<0x100>, 0x16>
         public ResultCode GetNasApiFqdn(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(43)]
         // GetNasApiFqdnEx() -> (u32, buffer<unknown<0x100>, 0x16>)
         public ResultCode GetNasApiFqdnEx(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(50)]
         // GetCurrentSetting() -> buffer<unknown<0x12bf0>, 0x16>
         public ResultCode GetCurrentSetting(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(60)]
@@ -221,7 +221,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Nsd
             // TODO: Call nn::nsd::detail::fs::ReadSaveDataWithOffset() at offset 0 to write the 
             //       whole savedata inside the buffer.
 
-            Logger.PrintStub(LogClass.ServiceNsd);
+            Logger.Stub?.PrintStub(LogClass.ServiceNsd);
 
             return ResultCode.Success;
         }
@@ -262,7 +262,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Nsd
         // IsChangeEnvironmentIdentifierDisabled() -> bytes<1>
         public ResultCode IsChangeEnvironmentIdentifierDisabled(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
     }
 }

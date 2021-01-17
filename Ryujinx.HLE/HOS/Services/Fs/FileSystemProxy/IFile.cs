@@ -6,9 +6,9 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
 {
     class IFile : IpcService, IDisposable
     {
-        private LibHac.Fs.IFile _baseFile;
+        private LibHac.Fs.Fsa.IFile _baseFile;
 
-        public IFile(LibHac.Fs.IFile baseFile)
+        public IFile(LibHac.Fs.Fsa.IFile baseFile)
         {
             _baseFile = baseFile;
         }
@@ -19,7 +19,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
         {
             long position = context.Request.ReceiveBuff[0].Position;
 
-            ReadOption readOption = (ReadOption)context.RequestData.ReadInt32();
+            ReadOption readOption = new ReadOption(context.RequestData.ReadInt32());
             context.RequestData.BaseStream.Position += 4;
 
             long offset = context.RequestData.ReadInt64();
@@ -29,7 +29,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
 
             Result result = _baseFile.Read(out long bytesRead, offset, data, readOption);
 
-            context.Memory.WriteBytes(position, data);
+            context.Memory.Write((ulong)position, data);
 
             context.ResponseData.Write(bytesRead);
 
@@ -42,13 +42,15 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
         {
             long position = context.Request.SendBuff[0].Position;
 
-            WriteOption writeOption = (WriteOption)context.RequestData.ReadInt32();
+            WriteOption writeOption = new WriteOption(context.RequestData.ReadInt32());
             context.RequestData.BaseStream.Position += 4;
 
             long offset = context.RequestData.ReadInt64();
             long size   = context.RequestData.ReadInt64();
 
-            byte[] data = context.Memory.ReadBytes(position, size);
+            byte[] data = new byte[size];
+
+            context.Memory.Read((ulong)position, data);
 
             return (ResultCode)_baseFile.Write(offset, data, writeOption).Value;
         }

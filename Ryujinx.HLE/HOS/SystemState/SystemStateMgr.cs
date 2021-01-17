@@ -28,12 +28,9 @@ namespace Ryujinx.HLE.HOS.SystemState
             "zh-Hant"
         };
 
-        internal static string[] AudioOutputs = new string[]
-        {
-            "AudioTvOutput",
-            "AudioStereoJackOutput",
-            "AudioBuiltInSpeakerOutput"
-        };
+        internal long DesiredKeyboardLayout { get; private set; }
+
+        internal SystemLanguage DesiredSystemLanguage { get; private set; }
 
         internal long DesiredLanguageCode { get; private set; }
 
@@ -53,17 +50,19 @@ namespace Ryujinx.HLE.HOS.SystemState
 
         public SystemStateMgr()
         {
-            SetAudioOutputAsBuiltInSpeaker();
-
             Account = new AccountUtils();
 
             Account.AddUser(DefaultUserId, "Player");
             Account.OpenUser(DefaultUserId);
+
+            // TODO: Let user specify.
+            DesiredKeyboardLayout = (long)KeyboardLayout.Default;
         }
 
         public void SetLanguage(SystemLanguage language)
         {
-            DesiredLanguageCode = GetLanguageCode((int)language);
+            DesiredSystemLanguage = language;
+            DesiredLanguageCode = GetLanguageCode((int)DesiredSystemLanguage);
 
             switch (language)
             {
@@ -81,24 +80,9 @@ namespace Ryujinx.HLE.HOS.SystemState
             }
         }
 
-        public void SetRegion(SystemRegion region)
+        public void SetRegion(RegionCode region)
         {
             DesiredRegionCode = (uint)region;
-        }
-
-        public void SetAudioOutputAsTv()
-        {
-            ActiveAudioOutput = AudioOutputs[0];
-        }
-
-        public void SetAudioOutputAsStereoJack()
-        {
-            ActiveAudioOutput = AudioOutputs[1];
-        }
-
-        public void SetAudioOutputAsBuiltInSpeaker()
-        {
-            ActiveAudioOutput = AudioOutputs[2];
         }
 
         internal static long GetLanguageCode(int index)

@@ -1,14 +1,13 @@
+using OpenTK.Graphics;
 using OpenTK.Graphics.OpenGL;
 using Ryujinx.Graphics.GAL;
+using Ryujinx.Graphics.OpenGL.Image;
 using System;
 
 namespace Ryujinx.Graphics.OpenGL
 {
     class Window : IWindow, IDisposable
     {
-        private const int NativeWidth  = 1280;
-        private const int NativeHeight = 720;
-
         private readonly Renderer _renderer;
 
         private int _width;
@@ -16,12 +15,11 @@ namespace Ryujinx.Graphics.OpenGL
 
         private int _copyFramebufferHandle;
 
+        internal BackgroundContextWorker BackgroundContext { get; private set; }
+
         public Window(Renderer renderer)
         {
             _renderer = renderer;
-
-            _width  = NativeWidth;
-            _height = NativeHeight;
         }
 
         public void Present(ITexture texture, ImageCrop crop)
@@ -43,18 +41,19 @@ namespace Ryujinx.Graphics.OpenGL
         {
             bool[] oldFramebufferColorWritemask = new bool[4];
 
-            int oldReadFramebufferHandle = GL.GetInteger(GetPName.ReadFramebufferBinding);
-            int oldDrawFramebufferHandle = GL.GetInteger(GetPName.DrawFramebufferBinding);
+            (int oldDrawFramebufferHandle, int oldReadFramebufferHandle) = ((Pipeline)_renderer.Pipeline).GetBoundFramebuffers();
 
             GL.GetBoolean(GetIndexedPName.ColorWritemask, drawFramebuffer, oldFramebufferColorWritemask);
 
             GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, drawFramebuffer);
             GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, readFramebuffer);
 
+            TextureView viewConverted = view.Format.IsBgra8() ? _renderer.TextureCopy.BgraSwap(view) : view;
+
             GL.FramebufferTexture(
                 FramebufferTarget.ReadFramebuffer,
                 FramebufferAttachment.ColorAttachment0,
-                view.Handle,
+                viewConverted.Handle,
                 0);
 
             GL.ReadBuffer(ReadBufferMode.ColorAttachment0);
@@ -65,11 +64,12 @@ namespace Ryujinx.Graphics.OpenGL
             GL.Clear(ClearBufferMask.ColorBufferBit);
 
             int srcX0, srcX1, srcY0, srcY1;
+            float scale = view.ScaleFactor;
 
             if (crop.Left == 0 && crop.Right == 0)
             {
                 srcX0 = 0;
-                srcX1 = view.Width;
+                srcX1 = (int)(view.Width / scale);
             }
             else
             {
@@ -80,7 +80,7 @@ namespace Ryujinx.Graphics.OpenGL
             if (crop.Top == 0 && crop.Bottom == 0)
             {
                 srcY0 = 0;
-                srcY1 = view.Height;
+                srcY1 = (int)(view.Height / scale);
             }
             else
             {
@@ -88,8 +88,16 @@ namespace Ryujinx.Graphics.OpenGL
                 srcY1 = crop.Bottom;
             }
 
-            float ratioX = MathF.Min(1f, (_height * (float)NativeWidth)  / ((float)NativeHeight * _width));
-            float ratioY = MathF.Min(1f, (_width  * (float)NativeHeight) / ((float)NativeWidth  * _height));
+            if (scale != 1f)
+            {
+                srcX0 = (int)(srcX0 * scale);
+                srcY0 = (int)(srcY0 * scale);
+                srcX1 = (int)Math.Ceiling(srcX1 * scale);
+                srcY1 = (int)Math.Ceiling(srcY1 * scale);
+            }
+
+            float ratioX = crop.IsStretched ? 1.0f : MathF.Min(1.0f, _height * crop.AspectRatioX / (_width  * crop.AspectRatioY));
+            float ratioY = crop.IsStretched ? 1.0f : MathF.Min(1.0f, _width  * crop.AspectRatioY / (_height * crop.AspectRatioX));
 
             int dstWidth  = (int)(_width  * ratioX);
             int dstHeight = (int)(_height * ratioY);
@@ -129,6 +137,11 @@ namespace Ryujinx.Graphics.OpenGL
 
             ((Pipeline)_renderer.Pipeline).RestoreScissor0Enable();
             ((Pipeline)_renderer.Pipeline).RestoreRasterizerDiscard();
+
+            if (viewConverted != view)
+            {
+                viewConverted.Dispose();
+            }
         }
 
         private int GetCopyFramebufferHandleLazy()
@@ -145,8 +158,15 @@ namespace Ryujinx.Graphics.OpenGL
             return handle;
         }
 
+        public void InitializeBackgroundContext(IGraphicsContext baseContext)
+        {
+            BackgroundContext = new BackgroundContextWorker(baseContext);
+        }
+
         public void Dispose()
         {
+            BackgroundContext.Dispose();
+
             if (_copyFramebufferHandle != 0)
             {
                 GL.DeleteFramebuffer(_copyFramebufferHandle);

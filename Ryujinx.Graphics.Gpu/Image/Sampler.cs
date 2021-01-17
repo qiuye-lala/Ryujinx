@@ -23,6 +23,8 @@ namespace Ryujinx.Graphics.Gpu.Image
             MinFilter minFilter = descriptor.UnpackMinFilter();
             MagFilter magFilter = descriptor.UnpackMagFilter();
 
+            bool seamlessCubemap = descriptor.UnpackSeamlessCubemap();
+
             AddressMode addressU = descriptor.UnpackAddressU();
             AddressMode addressV = descriptor.UnpackAddressV();
             AddressMode addressP = descriptor.UnpackAddressP();
@@ -41,7 +43,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             float mipLodBias = descriptor.UnpackMipLodBias();
 
             float maxRequestedAnisotropy = GraphicsConfig.MaxAnisotropy >= 0 && GraphicsConfig.MaxAnisotropy <= 16 ? GraphicsConfig.MaxAnisotropy : descriptor.UnpackMaxAnisotropy();
-            float maxSupportedAnisotropy = context.Capabilities.MaxSupportedAnisotropy;
+            float maxSupportedAnisotropy = context.Capabilities.MaximumSupportedAnisotropy;
 
             if (maxRequestedAnisotropy > maxSupportedAnisotropy)
                 maxRequestedAnisotropy = maxSupportedAnisotropy;
@@ -49,6 +51,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             HostSampler = context.Renderer.CreateSampler(new SamplerCreateInfo(
                 minFilter,
                 magFilter,
+                seamlessCubemap,
                 addressU,
                 addressV,
                 addressP,

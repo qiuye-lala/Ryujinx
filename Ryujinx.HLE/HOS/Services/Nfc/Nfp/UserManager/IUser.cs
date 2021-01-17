@@ -31,7 +31,9 @@ namespace Ryujinx.HLE.HOS.Services.Nfc.Nfp
             long inputPosition = context.Request.SendBuff[0].Position;
             long inputSize     = context.Request.SendBuff[0].Size;
 
-            byte[] unknownBuffer = context.Memory.ReadBytes(inputPosition, inputSize);
+            byte[] unknownBuffer = new byte[inputSize];
+
+            context.Memory.Read((ulong)inputPosition, unknownBuffer);
 
             // NOTE: appletResourceUserId, mcuVersionData and the buffer are stored inside an internal struct.
             //       The buffer seems to contains entries with a size of 0x40 bytes each.
@@ -89,7 +91,7 @@ namespace Ryujinx.HLE.HOS.Services.Nfc.Nfp
 
             for (int i = 0; i < _devices.Count; i++)
             {
-                context.Memory.WriteUInt32(outputPosition + (i * sizeof(long)), (uint)_devices[i].Handle);
+                context.Memory.Write((ulong)(outputPosition + (i * sizeof(long))), (uint)_devices[i].Handle);
             }
 
             context.ResponseData.Write(_devices.Count);
@@ -101,98 +103,98 @@ namespace Ryujinx.HLE.HOS.Services.Nfc.Nfp
         // StartDetection(bytes<8, 4>)
         public ResultCode StartDetection(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(4)]
         // StopDetection(bytes<8, 4>)
         public ResultCode StopDetection(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(5)]
         // Mount(bytes<8, 4>, u32, u32)
         public ResultCode Mount(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(6)]
         // Unmount(bytes<8, 4>)
         public ResultCode Unmount(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(7)]
         // OpenApplicationArea(bytes<8, 4>, u32)
         public ResultCode OpenApplicationArea(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(8)]
         // GetApplicationArea(bytes<8, 4>) -> (u32, buffer<unknown, 6>)
         public ResultCode GetApplicationArea(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(9)]
         // SetApplicationArea(bytes<8, 4>, buffer<unknown, 5>)
         public ResultCode SetApplicationArea(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(10)]
         // Flush(bytes<8, 4>)
         public ResultCode Flush(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(11)]
         // Restore(bytes<8, 4>)
         public ResultCode Restore(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(12)]
         // CreateApplicationArea(bytes<8, 4>, u32, buffer<unknown, 5>)
         public ResultCode CreateApplicationArea(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(13)]
         // GetTagInfo(bytes<8, 4>) -> buffer<unknown<0x58>, 0x1a>
         public ResultCode GetTagInfo(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(14)]
         // GetRegisterInfo(bytes<8, 4>) -> buffer<unknown<0x100>, 0x1a>
         public ResultCode GetRegisterInfo(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(15)]
         // GetCommonInfo(bytes<8, 4>) -> buffer<unknown<0x40>, 0x1a>
         public ResultCode GetCommonInfo(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(16)]
         // GetModelInfo(bytes<8, 4>) -> buffer<unknown<0x40>, 0x1a>
         public ResultCode GetModelInfo(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(17)]
@@ -207,7 +209,7 @@ namespace Ryujinx.HLE.HOS.Services.Nfc.Nfp
                 {
                     if (_devices[i].ActivateEventHandle == 0)
                     {
-                        _devices[i].ActivateEvent = new KEvent(context.Device.System);
+                        _devices[i].ActivateEvent = new KEvent(context.Device.System.KernelContext);
 
                         if (context.Process.HandleTable.GenerateHandle(_devices[i].ActivateEvent.ReadableEvent, out _devices[i].ActivateEventHandle) != KernelResult.Success)
                         {
@@ -236,7 +238,7 @@ namespace Ryujinx.HLE.HOS.Services.Nfc.Nfp
                 {
                     if (_devices[i].DeactivateEventHandle == 0)
                     {
-                        _devices[i].DeactivateEvent = new KEvent(context.Device.System);
+                        _devices[i].DeactivateEvent = new KEvent(context.Device.System.KernelContext);
 
                         if (context.Process.HandleTable.GenerateHandle(_devices[i].DeactivateEvent.ReadableEvent, out _devices[i].DeactivateEventHandle) != KernelResult.Success)
                         {
@@ -306,7 +308,7 @@ namespace Ryujinx.HLE.HOS.Services.Nfc.Nfp
         // GetApplicationAreaSize(bytes<8, 4>) -> u32
         public ResultCode GetApplicationAreaSize(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(23)] // 3.0.0+
@@ -315,7 +317,7 @@ namespace Ryujinx.HLE.HOS.Services.Nfc.Nfp
         {
             if (_availabilityChangeEventHandle == 0)
             {
-                _availabilityChangeEvent = new KEvent(context.Device.System);
+                _availabilityChangeEvent = new KEvent(context.Device.System.KernelContext);
 
                 if (context.Process.HandleTable.GenerateHandle(_availabilityChangeEvent.ReadableEvent, out _availabilityChangeEventHandle) != KernelResult.Success)
                 {
@@ -332,7 +334,7 @@ namespace Ryujinx.HLE.HOS.Services.Nfc.Nfp
         // RecreateApplicationArea(bytes<8, 4>, u32, buffer<unknown, 5>)
         public ResultCode RecreateApplicationArea(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
     }
 }

@@ -32,6 +32,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 Operand src = Attribute(op.AttributeOffset + index * 4);
 
+                context.FlagAttributeRead(src.Value);
+
                 context.Copy(Register(rd), context.LoadAttribute(src, primVertex));
             }
         }
@@ -55,13 +57,47 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
+        public static void Atom(EmitterContext context)
+        {
+            OpCodeAtom op = (OpCodeAtom)context.CurrOp;
+
+            ReductionType type = (ReductionType)op.RawOpCode.Extract(49, 2);
+
+            int sOffset = (op.RawOpCode.Extract(28, 20) << 12) >> 12;
+
+            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, op.Ra, op.Extended, sOffset);
+
+            Operand value = GetSrcB(context);
+
+            Operand res = EmitAtomicOp(
+                context,
+                Instruction.MrGlobal,
+                op.AtomicOp,
+                type,
+                addrLow,
+                addrHigh,
+                value);
+
+            context.Copy(GetDest(context), res);
+        }
+
         public static void Atoms(EmitterContext context)
         {
             OpCodeAtom op = (OpCodeAtom)context.CurrOp;
 
+            ReductionType type = op.RawOpCode.Extract(28, 2) switch
+            {
+                0 => ReductionType.U32,
+                1 => ReductionType.S32,
+                2 => ReductionType.U64,
+                _ => ReductionType.S64
+            };
+
             Operand offset = context.ShiftRightU32(GetSrcA(context), Const(2));
 
-            offset = context.IAdd(offset, Const(op.Offset));
+            int sOffset = (op.RawOpCode.Extract(30, 22) << 10) >> 10;
+
+            offset = context.IAdd(offset, Const(sOffset));
 
             Operand value = GetSrcB(context);
 
@@ -69,7 +105,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 context,
                 Instruction.MrShared,
                 op.AtomicOp,
-                op.Type,
+                type,
                 offset,
                 Const(0),
                 value);
@@ -88,13 +124,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
             else
             {
-                context.Config.PrintLog($"Invalid barrier mode: {op.Mode}.");
+                context.Config.GpuAccessor.Log($"Invalid barrier mode: {op.Mode}.");
             }
         }
 
         public static void Ipa(EmitterContext context)
         {
             OpCodeIpa op = (OpCodeIpa)context.CurrOp;
+
+            context.FlagAttributeRead(op.AttributeOffset);
 
             Operand res = Attribute(op.AttributeOffset);
 
@@ -108,7 +146,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     res = context.FPMultiply(res, Attribute(AttributeConsts.PositionW));
                 }
             }
- 
+
             if (op.Mode == InterpolationMode.Default)
             {
                 Operand srcB = GetSrcB(context);
@@ -141,14 +179,24 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (op.Size > IntegerSize.B64)
             {
-                context.Config.PrintLog($"Invalid LDC size: {op.Size}.");
+                context.Config.GpuAccessor.Log($"Invalid LDC size: {op.Size}.");
             }
 
             bool isSmallInt = op.Size < IntegerSize.B32;
 
             int count = op.Size == IntegerSize.B64 ? 2 : 1;
 
-            Operand addr = context.IAdd(GetSrcA(context), Const(op.Offset));
+            Operand slot = Const(op.Slot);
+            Operand srcA = GetSrcA(context);
+
+            if (op.IndexMode == CbIndexMode.Is ||
+                op.IndexMode == CbIndexMode.Isl)
+            {
+                slot = context.IAdd(slot, context.BitfieldExtractU32(srcA, Const(16), Const(16)));
+                srcA = context.BitwiseAnd(srcA, Const(0xffff));
+            }
+
+            Operand addr = context.IAdd(srcA, Const(op.Offset));
 
             Operand wordOffset = context.ShiftRightU32(addr, Const(2));
 
@@ -165,7 +213,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 Operand offset = context.IAdd(wordOffset, Const(index));
 
-                Operand value = context.LoadConstant(Const(op.Slot), offset);
+                Operand value = context.LoadConstant(slot, offset);
 
                 if (isSmallInt)
                 {
@@ -209,7 +257,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (!(emit || cut))
             {
-                context.Config.PrintLog("Invalid OUT encoding.");
+                context.Config.GpuAccessor.Log("Invalid OUT encoding.");
             }
 
             if (emit)
@@ -274,7 +322,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.Config.PrintLog($"Invalid reduction type: {type}.");
+                        context.Config.GpuAccessor.Log($"Invalid reduction type: {type}.");
                     }
                     break;
                 case AtomicOp.BitwiseAnd:
@@ -284,7 +332,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.Config.PrintLog($"Invalid reduction type: {type}.");
+                        context.Config.GpuAccessor.Log($"Invalid reduction type: {type}.");
                     }
                     break;
                 case AtomicOp.BitwiseExclusiveOr:
@@ -294,7 +342,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.Config.PrintLog($"Invalid reduction type: {type}.");
+                        context.Config.GpuAccessor.Log($"Invalid reduction type: {type}.");
                     }
                     break;
                 case AtomicOp.BitwiseOr:
@@ -304,7 +352,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.Config.PrintLog($"Invalid reduction type: {type}.");
+                        context.Config.GpuAccessor.Log($"Invalid reduction type: {type}.");
                     }
                     break;
                 case AtomicOp.Maximum:
@@ -318,7 +366,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.Config.PrintLog($"Invalid reduction type: {type}.");
+                        context.Config.GpuAccessor.Log($"Invalid reduction type: {type}.");
                     }
                     break;
                 case AtomicOp.Minimum:
@@ -332,7 +380,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else
                     {
-                        context.Config.PrintLog($"Invalid reduction type: {type}.");
+                        context.Config.GpuAccessor.Log($"Invalid reduction type: {type}.");
                     }
                     break;
             }
@@ -346,7 +394,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (op.Size > IntegerSize.B128)
             {
-                context.Config.PrintLog($"Invalid load size: {op.Size}.");
+                context.Config.GpuAccessor.Log($"Invalid load size: {op.Size}.");
             }
 
             bool isSmallInt = op.Size < IntegerSize.B32;
@@ -432,7 +480,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (op.Size > IntegerSize.B128)
             {
-                context.Config.PrintLog($"Invalid store size: {op.Size}.");
+                context.Config.GpuAccessor.Log($"Invalid store size: {op.Size}.");
             }
 
             bool isSmallInt = op.Size < IntegerSize.B32;
@@ -453,7 +501,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             for (int index = 0; index < count; index++)
             {
-                Register rd = new Register(op.Rd.Index + index, RegisterType.Gpr);
+                bool isRz = op.Rd.IsRZ;
+
+                Register rd = new Register(isRz ? op.Rd.Index : op.Rd.Index + index, RegisterType.Gpr);
 
                 Operand value = Register(rd);
 
@@ -477,11 +527,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     case MemoryRegion.Local:  context.StoreLocal (offset, value); break;
                     case MemoryRegion.Shared: context.StoreShared(offset, value); break;
                 }
-
-                if (rd.IsRZ)
-                {
-                    break;
-                }
             }
         }
 
@@ -499,7 +544,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             for (int index = 0; index < count; index++)
             {
-                Register rd = new Register(op.Rd.Index + index, RegisterType.Gpr);
+                bool isRz = op.Rd.IsRZ;
+
+                Register rd = new Register(isRz ? op.Rd.Index : op.Rd.Index + index, RegisterType.Gpr);
 
                 Operand value = Register(rd);
 
@@ -511,11 +558,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
 
                 context.StoreGlobal(context.IAdd(addrLow, Const(index * 4)), addrHigh, value);
-
-                if (rd.IsRZ)
-                {
-                    break;
-                }
             }
         }
 

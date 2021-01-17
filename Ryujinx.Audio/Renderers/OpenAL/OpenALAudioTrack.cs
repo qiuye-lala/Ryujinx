@@ -12,6 +12,11 @@ namespace Ryujinx.Audio
         public ALFormat      Format     { get; private set; }
         public PlaybackState State      { get; set; }
 
+        public int HardwareChannels { get; }
+        public int VirtualChannels { get; }
+        public uint BufferCount => (uint)_buffers.Count;
+        public ulong PlayedSampleCount { get; set; }
+
         private ReleaseCallback _callback;
 
         private ConcurrentDictionary<long, int> _buffers;
@@ -21,12 +26,15 @@ namespace Ryujinx.Audio
 
         private bool _disposed;
 
-        public OpenALAudioTrack(int sampleRate, ALFormat format, ReleaseCallback callback)
+        public OpenALAudioTrack(int sampleRate, ALFormat format, int hardwareChannels, int virtualChannels, ReleaseCallback callback)
         {
             SampleRate = sampleRate;
             Format     = format;
             State      = PlaybackState.Stopped;
             SourceId   = AL.GenSource();
+
+            HardwareChannels = hardwareChannels;
+            VirtualChannels = virtualChannels;
 
             _callback = callback;
 
@@ -117,6 +125,39 @@ namespace Ryujinx.Audio
 
                 _callback();
             }
+        }
+
+        public bool FlushBuffers()
+        {
+            while (_queuedTagsQueue.TryDequeue(out long tag))
+            {
+                _releasedTagsQueue.Enqueue(tag);
+            }
+
+            _callback();
+
+            foreach (var buffer in _buffers)
+            {
+                AL.DeleteBuffer(buffer.Value);
+            }
+
+            bool heldBuffers = _buffers.Count > 0;
+
+            _buffers.Clear();
+
+            return heldBuffers;
+        }
+
+        public void SetVolume(float volume)
+        {
+            AL.Source(SourceId, ALSourcef.Gain, volume);
+        }
+
+        public float GetVolume()
+        {
+            AL.GetSource(SourceId, ALSourcef.Gain, out float volume);
+
+            return volume;
         }
 
         public void Dispose()

@@ -1,6 +1,5 @@
 using Ryujinx.Graphics.Shader.Instructions;
 using System;
-using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -10,161 +9,185 @@ namespace Ryujinx.Graphics.Shader.Decoders
 {
     static class Decoder
     {
-        public static Block[] Decode(ReadOnlySpan<byte> code, ulong headerSize)
+        public static Block[][] Decode(IGpuAccessor gpuAccessor, ulong startAddress)
         {
-            List<Block> blocks = new List<Block>();
+            List<Block[]> funcs = new List<Block[]>();
 
-            Queue<Block> workQueue = new Queue<Block>();
+            Queue<ulong> funcQueue = new Queue<ulong>();
+            HashSet<ulong> funcVisited = new HashSet<ulong>();
 
-            Dictionary<ulong, Block> visited = new Dictionary<ulong, Block>();
-
-            ulong maxAddress = (ulong)code.Length - headerSize;
-
-            Block GetBlock(ulong blkAddress)
+            void EnqueueFunction(ulong funcAddress)
             {
-                if (!visited.TryGetValue(blkAddress, out Block block))
+                if (funcVisited.Add(funcAddress))
                 {
-                    block = new Block(blkAddress);
-
-                    workQueue.Enqueue(block);
-
-                    visited.Add(blkAddress, block);
+                    funcQueue.Enqueue(funcAddress);
                 }
-
-                return block;
             }
 
-            GetBlock(0);
+            funcQueue.Enqueue(0);
 
-            while (workQueue.TryDequeue(out Block currBlock))
+            while (funcQueue.TryDequeue(out ulong funcAddress))
             {
-                // Check if the current block is inside another block.
-                if (BinarySearch(blocks, currBlock.Address, out int nBlkIndex))
-                {
-                    Block nBlock = blocks[nBlkIndex];
+                List<Block> blocks = new List<Block>();
+                Queue<Block> workQueue = new Queue<Block>();
+                Dictionary<ulong, Block> visited = new Dictionary<ulong, Block>();
 
-                    if (nBlock.Address == currBlock.Address)
+                Block GetBlock(ulong blkAddress)
+                {
+                    if (!visited.TryGetValue(blkAddress, out Block block))
                     {
-                        throw new InvalidOperationException("Found duplicate block address on the list.");
+                        block = new Block(blkAddress);
+
+                        workQueue.Enqueue(block);
+                        visited.Add(blkAddress, block);
                     }
 
-                    nBlock.Split(currBlock);
-
-                    blocks.Insert(nBlkIndex + 1, currBlock);
-
-                    continue;
+                    return block;
                 }
 
-                // If we have a block after the current one, set the limit address.
-                ulong limitAddress = maxAddress;
+                GetBlock(funcAddress);
 
-                if (nBlkIndex != blocks.Count)
+                while (workQueue.TryDequeue(out Block currBlock))
                 {
-                    Block nBlock = blocks[nBlkIndex];
-
-                    int nextIndex = nBlkIndex + 1;
-
-                    if (nBlock.Address < currBlock.Address && nextIndex < blocks.Count)
+                    // Check if the current block is inside another block.
+                    if (BinarySearch(blocks, currBlock.Address, out int nBlkIndex))
                     {
-                        limitAddress = blocks[nextIndex].Address;
-                    }
-                    else if (nBlock.Address > currBlock.Address)
-                    {
-                        limitAddress = blocks[nBlkIndex].Address;
-                    }
-                }
+                        Block nBlock = blocks[nBlkIndex];
 
-                FillBlock(code, currBlock, limitAddress, headerSize);
-
-                if (currBlock.OpCodes.Count != 0)
-                {
-                    // We should have blocks for all possible branch targets,
-                    // including those from SSY/PBK instructions.
-                    foreach (OpCodePush pushOp in currBlock.PushOpCodes)
-                    {
-                        if (pushOp.GetAbsoluteAddress() >= maxAddress)
+                        if (nBlock.Address == currBlock.Address)
                         {
-                            return null;
+                            throw new InvalidOperationException("Found duplicate block address on the list.");
                         }
 
-                        GetBlock(pushOp.GetAbsoluteAddress());
+                        nBlock.Split(currBlock);
+                        blocks.Insert(nBlkIndex + 1, currBlock);
+
+                        continue;
                     }
 
-                    // Set child blocks. "Branch" is the block the branch instruction
-                    // points to (when taken), "Next" is the block at the next address,
-                    // executed when the branch is not taken. For Unconditional Branches
-                    // or end of program, Next is null.
-                    OpCode lastOp = currBlock.GetLastOp();
+                    // If we have a block after the current one, set the limit address.
+                    ulong limitAddress = ulong.MaxValue;
 
-                    if (lastOp is OpCodeBranch opBr)
+                    if (nBlkIndex != blocks.Count)
                     {
-                        if (opBr.GetAbsoluteAddress() >= maxAddress)
+                        Block nBlock = blocks[nBlkIndex];
+
+                        int nextIndex = nBlkIndex + 1;
+
+                        if (nBlock.Address < currBlock.Address && nextIndex < blocks.Count)
                         {
-                            return null;
+                            limitAddress = blocks[nextIndex].Address;
+                        }
+                        else if (nBlock.Address > currBlock.Address)
+                        {
+                            limitAddress = blocks[nBlkIndex].Address;
+                        }
+                    }
+
+                    FillBlock(gpuAccessor, currBlock, limitAddress, startAddress);
+
+                    if (currBlock.OpCodes.Count != 0)
+                    {
+                        // We should have blocks for all possible branch targets,
+                        // including those from SSY/PBK instructions.
+                        foreach (OpCodePush pushOp in currBlock.PushOpCodes)
+                        {
+                            GetBlock(pushOp.GetAbsoluteAddress());
                         }
 
-                        currBlock.Branch = GetBlock(opBr.GetAbsoluteAddress());
+                        // Set child blocks. "Branch" is the block the branch instruction
+                        // points to (when taken), "Next" is the block at the next address,
+                        // executed when the branch is not taken. For Unconditional Branches
+                        // or end of program, Next is null.
+                        OpCode lastOp = currBlock.GetLastOp();
+
+                        if (lastOp is OpCodeBranch opBr)
+                        {
+                            if (lastOp.Emitter == InstEmit.Cal)
+                            {
+                                EnqueueFunction(opBr.GetAbsoluteAddress());
+                            }
+                            else
+                            {
+                                currBlock.Branch = GetBlock(opBr.GetAbsoluteAddress());
+                            }
+                        }
+                        else if (lastOp is OpCodeBranchIndir opBrIndir)
+                        {
+                            // An indirect branch could go anywhere, we don't know the target.
+                            // Those instructions are usually used on a switch to jump table
+                            // compiler optimization, and in those cases the possible targets
+                            // seems to be always right after the BRX itself. We can assume
+                            // that the possible targets are all the blocks in-between the
+                            // instruction right after the BRX, and the common target that
+                            // all the "cases" should eventually jump to, acting as the
+                            // switch break.
+                            Block firstTarget = GetBlock(currBlock.EndAddress);
+
+                            firstTarget.BrIndir = opBrIndir;
+
+                            opBrIndir.PossibleTargets.Add(firstTarget);
+                        }
+
+                        if (!IsUnconditionalBranch(lastOp))
+                        {
+                            currBlock.Next = GetBlock(currBlock.EndAddress);
+                        }
                     }
-                    else if (lastOp is OpCodeBranchIndir opBrIndir)
+
+                    // Insert the new block on the list (sorted by address).
+                    if (blocks.Count != 0)
                     {
-                        // An indirect branch could go anywhere, we don't know the target.
-                        // Those instructions are usually used on a switch to jump table
-                        // compiler optimization, and in those cases the possible targets
-                        // seems to be always right after the BRX itself. We can assume
-                        // that the possible targets are all the blocks in-between the
-                        // instruction right after the BRX, and the common target that
-                        // all the "cases" should eventually jump to, acting as the
-                        // switch break.
-                        Block firstTarget = GetBlock(currBlock.EndAddress);
+                        Block nBlock = blocks[nBlkIndex];
 
-                        firstTarget.BrIndir = opBrIndir;
-
-                        opBrIndir.PossibleTargets.Add(firstTarget);
+                        blocks.Insert(nBlkIndex + (nBlock.Address < currBlock.Address ? 1 : 0), currBlock);
                     }
-
-                    if (!IsUnconditionalBranch(lastOp))
+                    else
                     {
-                        currBlock.Next = GetBlock(currBlock.EndAddress);
+                        blocks.Add(currBlock);
                     }
-                }
 
-                // Insert the new block on the list (sorted by address).
-                if (blocks.Count != 0)
-                {
-                    Block nBlock = blocks[nBlkIndex];
-
-                    blocks.Insert(nBlkIndex + (nBlock.Address < currBlock.Address ? 1 : 0), currBlock);
-                }
-                else
-                {
-                    blocks.Add(currBlock);
-                }
-
-                // Do we have a block after the current one?
-                if (!IsExit(currBlock.GetLastOp()) && currBlock.BrIndir != null && currBlock.EndAddress < maxAddress)
-                {
-                    bool targetVisited = visited.ContainsKey(currBlock.EndAddress);
-
-                    Block possibleTarget = GetBlock(currBlock.EndAddress);
-
-                    currBlock.BrIndir.PossibleTargets.Add(possibleTarget);
-
-                    if (!targetVisited)
+                    // Do we have a block after the current one?
+                    if (currBlock.BrIndir != null && HasBlockAfter(gpuAccessor, currBlock, startAddress))
                     {
-                        possibleTarget.BrIndir = currBlock.BrIndir;
+                        bool targetVisited = visited.ContainsKey(currBlock.EndAddress);
+
+                        Block possibleTarget = GetBlock(currBlock.EndAddress);
+
+                        currBlock.BrIndir.PossibleTargets.Add(possibleTarget);
+
+                        if (!targetVisited)
+                        {
+                            possibleTarget.BrIndir = currBlock.BrIndir;
+                        }
                     }
                 }
+
+                foreach (Block block in blocks.Where(x => x.PushOpCodes.Count != 0))
+                {
+                    for (int pushOpIndex = 0; pushOpIndex < block.PushOpCodes.Count; pushOpIndex++)
+                    {
+                        PropagatePushOp(visited, block, pushOpIndex);
+                    }
+                }
+
+                funcs.Add(blocks.ToArray());
             }
 
-            foreach (Block block in blocks.Where(x => x.PushOpCodes.Count != 0))
+            return funcs.ToArray();
+        }
+
+        private static bool HasBlockAfter(IGpuAccessor gpuAccessor, Block currBlock, ulong startAdddress)
+        {
+            if (!gpuAccessor.MemoryMapped(startAdddress + currBlock.EndAddress) ||
+                !gpuAccessor.MemoryMapped(startAdddress + currBlock.EndAddress + 7))
             {
-                for (int pushOpIndex = 0; pushOpIndex < block.PushOpCodes.Count; pushOpIndex++)
-                {
-                    PropagatePushOp(visited, block, pushOpIndex);
-                }
+                return false;
             }
 
-            return blocks.ToArray();
+            ulong inst = gpuAccessor.MemoryRead<ulong>(startAdddress + currBlock.EndAddress);
+
+            return inst != 0UL;
         }
 
         private static bool BinarySearch(List<Block> blocks, ulong address, out int index)
@@ -203,10 +226,10 @@ namespace Ryujinx.Graphics.Shader.Decoders
         }
 
         private static void FillBlock(
-            ReadOnlySpan<byte> code,
-            Block              block,
-            ulong              limitAddress,
-            ulong              startAddress)
+            IGpuAccessor gpuAccessor,
+            Block        block,
+            ulong        limitAddress,
+            ulong        startAddress)
         {
             ulong address = block.Address;
 
@@ -225,16 +248,13 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     continue;
                 }
 
-                uint word0 = BinaryPrimitives.ReadUInt32LittleEndian(code.Slice((int)(startAddress + address)));
-                uint word1 = BinaryPrimitives.ReadUInt32LittleEndian(code.Slice((int)(startAddress + address + 4)));
-
                 ulong opAddress = address;
 
                 address += 8;
 
-                long opCode = word0 | (long)word1 << 32;
+                long opCode = gpuAccessor.MemoryRead<long>(startAddress + opAddress);
 
-                (InstEmitter emitter, OpCodeTable.OpActivator opActivator) = OpCodeTable.GetEmitter(opCode);
+                (InstEmitter emitter, OpCodeTable.MakeOp makeOp) = OpCodeTable.GetEmitter(opCode);
 
                 if (emitter == null)
                 {
@@ -245,16 +265,16 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     continue;
                 }
 
-                if (opActivator == null)
+                if (makeOp == null)
                 {
-                    throw new ArgumentNullException(nameof(opActivator));
+                    throw new ArgumentNullException(nameof(makeOp));
                 }
 
-                OpCode op = (OpCode)opActivator(emitter, opAddress, opCode);
+                OpCode op = makeOp(emitter, opAddress, opCode);
 
                 block.OpCodes.Add(op);
             }
-            while (!IsBranch(block.GetLastOp()));
+            while (!IsControlFlowChange(block.GetLastOp()));
 
             block.EndAddress = address;
 
@@ -263,7 +283,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
 
         private static bool IsUnconditionalBranch(OpCode opCode)
         {
-            return IsUnconditional(opCode) && IsBranch(opCode);
+            return IsUnconditional(opCode) && IsControlFlowChange(opCode);
         }
 
         private static bool IsUnconditional(OpCode opCode)
@@ -276,17 +296,12 @@ namespace Ryujinx.Graphics.Shader.Decoders
             return opCode.Predicate.Index == RegisterConsts.PredicateTrueIndex && !opCode.InvertPredicate;
         }
 
-        private static bool IsBranch(OpCode opCode)
+        private static bool IsControlFlowChange(OpCode opCode)
         {
             return (opCode is OpCodeBranch opBranch && !opBranch.PushTarget) ||
                     opCode is OpCodeBranchIndir                              ||
                     opCode is OpCodeBranchPop                                ||
                     opCode is OpCodeExit;
-        }
-
-        private static bool IsExit(OpCode opCode)
-        {
-            return opCode is OpCodeExit;
         }
 
         private struct PathBlockState

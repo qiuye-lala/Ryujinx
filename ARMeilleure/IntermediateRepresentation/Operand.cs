@@ -6,10 +6,12 @@ namespace ARMeilleure.IntermediateRepresentation
     class Operand
     {
         public OperandKind Kind { get; private set; }
-
         public OperandType Type { get; private set; }
 
         public ulong Value { get; private set; }
+
+        public bool Relocatable { get; private set; }
+        public int? PtcIndex    { get; private set; }
 
         public List<Node> Assignments { get; }
         public List<Node> Uses        { get; }
@@ -26,14 +28,24 @@ namespace ARMeilleure.IntermediateRepresentation
             Type = type;
         }
 
-        public Operand With(OperandKind kind, OperandType type = OperandType.None, ulong value = 0)
+        public Operand With(
+            OperandKind kind,
+            OperandType type = OperandType.None,
+            ulong value = 0,
+            bool relocatable = false,
+            int? index = null)
         {
             Kind = kind;
             Type = type;
+
             Value = value;
+
+            Relocatable = relocatable;
+            PtcIndex    = index;
 
             Assignments.Clear();
             Uses.Clear();
+
             return this;
         }
 
@@ -47,9 +59,9 @@ namespace ARMeilleure.IntermediateRepresentation
             return With(OperandKind.Constant, OperandType.I32, value);
         }
 
-        public Operand With(long value)
+        public Operand With(long value, bool relocatable = false, int? index = null)
         {
-            return With(OperandKind.Constant, OperandType.I64, (ulong)value);
+            return With(OperandKind.Constant, OperandType.I64, (ulong)value, relocatable, index);
         }
 
         public Operand With(ulong value)

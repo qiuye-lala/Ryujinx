@@ -3,12 +3,7 @@ using Ryujinx.Common.Logging;
 using Ryujinx.HLE.HOS.Services.Nifm.StaticService.GeneralService;
 using Ryujinx.HLE.HOS.Services.Nifm.StaticService.Types;
 using System;
-using System.Diagnostics;
-using System.Linq;
-using System.Net;
 using System.Net.NetworkInformation;
-using System.Net.Sockets;
-using System.Runtime.CompilerServices;
 
 namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
 {
@@ -34,7 +29,7 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
             long position = context.Request.RecvListBuff[0].Position;
             long size     = context.Request.RecvListBuff[0].Size;
 
-            context.Memory.WriteInt32(position, _generalServiceDetail.ClientId);
+            context.Memory.Write((ulong)position, _generalServiceDetail.ClientId);
 
             return ResultCode.Success;
         }
@@ -50,7 +45,7 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
             // Doesn't occur in our case.
             // return ResultCode.ObjectIsNull;
 
-            Logger.PrintStub(LogClass.ServiceNifm, new { version });
+            Logger.Stub?.PrintStub(LogClass.ServiceNifm, new { version });
 
             return ResultCode.Success;
         }
@@ -68,7 +63,7 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
 
             context.ResponseData.WriteStruct(new IpV4Address(unicastAddress.Address));
 
-            Logger.PrintInfo(LogClass.ServiceNifm, $"Console's local IP is \"{unicastAddress.Address}\".");
+            Logger.Info?.Print(LogClass.ServiceNifm, $"Console's local IP is \"{unicastAddress.Address}\".");
 
             return ResultCode.Success;
         }
@@ -84,7 +79,7 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
                 return ResultCode.NoInternetConnection;
             }
 
-            Logger.PrintInfo(LogClass.ServiceNifm, $"Console's local IP is \"{unicastAddress.Address}\".");
+            Logger.Info?.Print(LogClass.ServiceNifm, $"Console's local IP is \"{unicastAddress.Address}\".");
 
             context.ResponseData.WriteStruct(new IpAddressSetting(interfaceProperties, unicastAddress));
             context.ResponseData.WriteStruct(new DnsSetting(interfaceProperties));
@@ -120,7 +115,7 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
             long position = context.Request.PtrBuff[0].Position;
             long size     = context.Request.PtrBuff[0].Size;
 
-            int clientId = context.Memory.ReadInt32(position);
+            int clientId = context.Memory.Read<int>((ulong)position);
 
             context.ResponseData.Write(GeneralServiceManager.Get(clientId).IsAnyInternetRequestAccepted);
 

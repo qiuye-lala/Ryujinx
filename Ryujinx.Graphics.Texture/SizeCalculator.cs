@@ -20,7 +20,8 @@ namespace Ryujinx.Graphics.Texture
             int bytesPerPixel,
             int gobBlocksInY,
             int gobBlocksInZ,
-            int gobBlocksInTileX)
+            int gobBlocksInTileX,
+            int gpuLayerSize = 0)
         {
             bool is3D = depth > 1;
 
@@ -31,6 +32,9 @@ namespace Ryujinx.Graphics.Texture
 
             int mipGobBlocksInY = gobBlocksInY;
             int mipGobBlocksInZ = gobBlocksInZ;
+
+            int gobWidth  = (GobStride / bytesPerPixel) * gobBlocksInTileX;
+            int gobHeight = gobBlocksInY * GobHeight;
 
             for (int level = 0; level < levels; level++)
             {
@@ -51,7 +55,16 @@ namespace Ryujinx.Graphics.Texture
                     mipGobBlocksInZ >>= 1;
                 }
 
-                int widthInGobs = BitUtils.AlignUp(BitUtils.DivRoundUp(w * bytesPerPixel, GobStride), gobBlocksInTileX);
+                int widthInGobs = BitUtils.DivRoundUp(w * bytesPerPixel, GobStride);
+
+                int alignment = gobBlocksInTileX;
+
+                if (d < gobBlocksInZ || w <= gobWidth || h <= gobHeight)
+                {
+                    alignment = 1;
+                }
+
+                widthInGobs = BitUtils.AlignUp(widthInGobs, alignment);
 
                 int totalBlocksOfGobsInZ = BitUtils.DivRoundUp(d, mipGobBlocksInZ);
                 int totalBlocksOfGobsInY = BitUtils.DivRoundUp(BitUtils.DivRoundUp(h, GobHeight), mipGobBlocksInY);
@@ -82,13 +95,29 @@ namespace Ryujinx.Graphics.Texture
                 layerSize += totalBlocksOfGobsInZ * totalBlocksOfGobsInY * robSize;
             }
 
-            layerSize = AlignLayerSize(
-                layerSize,
-                height,
-                depth,
-                blockHeight,
-                gobBlocksInY,
-                gobBlocksInZ);
+            if (layers > 1)
+            {
+                layerSize = AlignLayerSize(
+                    layerSize,
+                    height,
+                    depth,
+                    blockHeight,
+                    gobBlocksInY,
+                    gobBlocksInZ,
+                    gobBlocksInTileX);
+            }
+
+            int totalSize;
+
+            if (layerSize < gpuLayerSize)
+            {
+                totalSize = (layers - 1) * gpuLayerSize + layerSize;
+                layerSize = gpuLayerSize;
+            }
+            else
+            {
+                totalSize = layerSize * layers;
+            }
 
             if (!is3D)
             {
@@ -103,8 +132,6 @@ namespace Ryujinx.Graphics.Texture
                     }
                 }
             }
-
-            int totalSize = layerSize * layers;
 
             return new SizeInfo(mipOffsets, allOffsets, levels, layerSize, totalSize);
         }
@@ -124,27 +151,37 @@ namespace Ryujinx.Graphics.Texture
             int depth,
             int blockHeight,
             int gobBlocksInY,
-            int gobBlocksInZ)
+            int gobBlocksInZ,
+            int gobBlocksInTileX)
         {
-            height = BitUtils.DivRoundUp(height, blockHeight);
-
-            while (height <= (gobBlocksInY >> 1) * GobHeight && gobBlocksInY != 1)
+            if (gobBlocksInTileX < 2)
             {
-                gobBlocksInY >>= 1;
+                height = BitUtils.DivRoundUp(height, blockHeight);
+
+                while (height <= (gobBlocksInY >> 1) * GobHeight && gobBlocksInY != 1)
+                {
+                    gobBlocksInY >>= 1;
+                }
+
+                while (depth <= (gobBlocksInZ >> 1) && gobBlocksInZ != 1)
+                {
+                    gobBlocksInZ >>= 1;
+                }
+
+                int blockOfGobsSize = gobBlocksInY * gobBlocksInZ * GobSize;
+
+                int sizeInBlockOfGobs = size / blockOfGobsSize;
+
+                if (size != sizeInBlockOfGobs * blockOfGobsSize)
+                {
+                    size = (sizeInBlockOfGobs + 1) * blockOfGobsSize;
+                }
             }
-
-            while (depth <= (gobBlocksInZ >> 1) && gobBlocksInZ != 1)
+            else
             {
-                gobBlocksInZ >>= 1;
-            }
+                int alignment = (gobBlocksInTileX * GobSize) * gobBlocksInY * gobBlocksInZ;
 
-            int blockOfGobsSize = gobBlocksInY * gobBlocksInZ * GobSize;
-
-            int sizeInBlockOfGobs = size / blockOfGobsSize;
-
-            if (size != sizeInBlockOfGobs * blockOfGobsSize)
-            {
-                size = (sizeInBlockOfGobs + 1) * blockOfGobsSize;
+                size = BitUtils.AlignUp(size, alignment);
             }
 
             return size;
@@ -164,12 +201,23 @@ namespace Ryujinx.Graphics.Texture
             width  = BitUtils.DivRoundUp(width,  blockWidth);
             height = BitUtils.DivRoundUp(height, blockHeight);
 
-            int gobWidth = gobBlocksInTileX * (GobStride / bytesPerPixel);
+            int gobWidth  = (GobStride / bytesPerPixel) * gobBlocksInTileX;
+            int gobHeight = gobBlocksInY * GobHeight;
+
+            int alignment = gobWidth;
+
+            if (depth < gobBlocksInZ || width <= gobWidth || height <= gobHeight)
+            {
+                alignment = GobStride / bytesPerPixel;
+            }
+
+            // Height has already been divided by block height, so pass it as 1.
+            (gobBlocksInY, gobBlocksInZ) = GetMipGobBlockSizes(height, depth, 1, gobBlocksInY, gobBlocksInZ);
 
             int blockOfGobsHeight = gobBlocksInY * GobHeight;
             int blockOfGobsDepth  = gobBlocksInZ;
 
-            width  = BitUtils.AlignUp(width,  gobWidth);
+            width  = BitUtils.AlignUp(width,  alignment);
             height = BitUtils.AlignUp(height, blockOfGobsHeight);
             depth  = BitUtils.AlignUp(depth,  blockOfGobsDepth);
 

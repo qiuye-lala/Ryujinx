@@ -34,9 +34,9 @@ namespace ARMeilleure.IntermediateRepresentation
             return Operand().With(value);
         }
 
-        public static Operand Const(long value)
+        public static Operand Const(long value, bool relocatable = false, int? index = null)
         {
-            return Operand().With(value);
+            return Operand().With(value, relocatable, index);
         }
 
         public static Operand Const(ulong value)
@@ -90,10 +90,16 @@ namespace ARMeilleure.IntermediateRepresentation
             ThreadStaticPool<MemoryOperand>.PreparePool(highCq ? 1 : 0);
         }
 
-        public static void ResetOperandPool(bool highCq)
+        public static void ReturnOperandPool(bool highCq)
         {
             ThreadStaticPool<Operand>.ReturnPool(highCq ? 1 : 0);
             ThreadStaticPool<MemoryOperand>.ReturnPool(highCq ? 1 : 0);
+        }
+
+        public static void ResetOperandPools()
+        {
+            ThreadStaticPool<Operand>.ResetPools();
+            ThreadStaticPool<MemoryOperand>.ResetPools();
         }
     }
 }

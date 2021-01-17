@@ -42,7 +42,8 @@ namespace Ryujinx.Graphics.Gpu.Engine
 
             ulong dstBaseAddress = _context.MemoryManager.Translate(_params.DstAddress.Pack());
 
-            _context.Methods.TextureManager.Flush(dstBaseAddress, (ulong)_size);
+            // Trigger read tracking, to flush any managed resources in the destination region.
+            _context.PhysicalMemory.GetSpan(dstBaseAddress, _size, true);
 
             _finished = false;
         }
@@ -74,7 +75,7 @@ namespace Ryujinx.Graphics.Gpu.Engine
 
             if (_isLinear && _params.LineCount == 1)
             {
-                ulong address = _context.MemoryManager.Translate( _params.DstAddress.Pack());
+                ulong address = _context.MemoryManager.Translate(_params.DstAddress.Pack());
 
                 _context.PhysicalMemory.Write(address, data);
             }
@@ -125,6 +126,8 @@ namespace Ryujinx.Graphics.Gpu.Engine
             }
 
             _finished = true;
+
+            _context.AdvanceSequence();
         }
     }
 }

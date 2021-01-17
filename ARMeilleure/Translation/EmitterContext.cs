@@ -1,30 +1,34 @@
+using ARMeilleure.Diagnostics;
 using ARMeilleure.IntermediateRepresentation;
 using ARMeilleure.State;
 using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
+using System.Reflection;
 
 using static ARMeilleure.IntermediateRepresentation.OperandHelper;
 
 namespace ARMeilleure.Translation
 {
+    using PTC;
+
     class EmitterContext
     {
-        private Dictionary<Operand, BasicBlock> _irLabels;
-
-        private IntrusiveList<BasicBlock> _irBlocks;
+        private readonly Dictionary<Operand, BasicBlock> _irLabels;
+        private readonly IntrusiveList<BasicBlock> _irBlocks;
 
         private BasicBlock _irBlock;
+        private BasicBlock _ifBlock;
 
         private bool _needsNewBlock;
+        private BasicBlockFrequency _nextBlockFreq;
 
         public EmitterContext()
         {
             _irLabels = new Dictionary<Operand, BasicBlock>();
-
             _irBlocks = new IntrusiveList<BasicBlock>();
 
             _needsNewBlock = true;
+            _nextBlockFreq = BasicBlockFrequency.Default;
         }
 
         public Operand Add(Operand op1, Operand op2)
@@ -54,23 +58,26 @@ namespace ARMeilleure.Translation
 
         public void Branch(Operand label)
         {
-            Add(Instruction.Branch, null);
+            NewNextBlockIfNeeded();
 
-            BranchToLabel(label);
+            BranchToLabel(label, uncond: true, BasicBlockFrequency.Default);
         }
 
-        public void BranchIfFalse(Operand label, Operand op1)
+        public void BranchIf(Operand label, Operand op1, Operand op2, Comparison comp, BasicBlockFrequency falseFreq = default)
         {
-            Add(Instruction.BranchIfFalse, null, op1);
+            Add(Instruction.BranchIf, null, op1, op2, Const((int)comp));
 
-            BranchToLabel(label);
+            BranchToLabel(label, uncond: false, falseFreq);
         }
 
-        public void BranchIfTrue(Operand label, Operand op1)
+        public void BranchIfFalse(Operand label, Operand op1, BasicBlockFrequency falseFreq = default)
         {
-            Add(Instruction.BranchIfTrue, null, op1);
+            BranchIf(label, op1, Const(op1.Type, 0), Comparison.Equal, falseFreq);
+        }
 
-            BranchToLabel(label);
+        public void BranchIfTrue(Operand label, Operand op1, BasicBlockFrequency falseFreq = default)
+        {
+            BranchIf(label, op1, Const(op1.Type, 0), Comparison.NotEqual, falseFreq);
         }
 
         public Operand ByteSwap(Operand op1)
@@ -78,40 +85,52 @@ namespace ARMeilleure.Translation
             return Add(Instruction.ByteSwap, Local(op1.Type), op1);
         }
 
-        public Operand Call(Delegate func, params Operand[] callArgs)
+        public Operand Call(MethodInfo info, params Operand[] callArgs)
         {
-            // Add the delegate to the cache to ensure it will not be garbage collected.
-            func = DelegateCache.GetOrAdd(func);
+            if (Ptc.State == PtcState.Disabled)
+            {
+                IntPtr funcPtr = Delegates.GetDelegateFuncPtr(info);
 
-            IntPtr ptr = Marshal.GetFunctionPointerForDelegate<Delegate>(func);
+                OperandType returnType = GetOperandType(info.ReturnType);
 
-            OperandType returnType = GetOperandType(func.Method.ReturnType);
+                Symbols.Add((ulong)funcPtr.ToInt64(), info.Name);
 
-            return Call(Const(ptr.ToInt64()), returnType, callArgs);
+                return Call(Const(funcPtr.ToInt64()), returnType, callArgs);
+            }
+            else
+            {
+                int index = Delegates.GetDelegateIndex(info);
+
+                IntPtr funcPtr = Delegates.GetDelegateFuncPtrByIndex(index);
+
+                OperandType returnType = GetOperandType(info.ReturnType);
+
+                Symbols.Add((ulong)funcPtr.ToInt64(), info.Name);
+
+                return Call(Const(funcPtr.ToInt64(), true, index), returnType, callArgs);
+            }
         }
-
-        private static Dictionary<TypeCode, OperandType> _typeCodeToOperandTypeMap =
-                   new Dictionary<TypeCode, OperandType>()
-        {
-            { TypeCode.Boolean, OperandType.I32  },
-            { TypeCode.Byte,    OperandType.I32  },
-            { TypeCode.Char,    OperandType.I32  },
-            { TypeCode.Double,  OperandType.FP64 },
-            { TypeCode.Int16,   OperandType.I32  },
-            { TypeCode.Int32,   OperandType.I32  },
-            { TypeCode.Int64,   OperandType.I64  },
-            { TypeCode.SByte,   OperandType.I32  },
-            { TypeCode.Single,  OperandType.FP32 },
-            { TypeCode.UInt16,  OperandType.I32  },
-            { TypeCode.UInt32,  OperandType.I32  },
-            { TypeCode.UInt64,  OperandType.I64  }
-        };
 
         private static OperandType GetOperandType(Type type)
         {
-            if (_typeCodeToOperandTypeMap.TryGetValue(Type.GetTypeCode(type), out OperandType ot))
+            if (type == typeof(bool)   || type == typeof(byte)  ||
+                type == typeof(char)   || type == typeof(short) ||
+                type == typeof(int)    || type == typeof(sbyte) ||
+                type == typeof(ushort) || type == typeof(uint))
             {
-                return ot;
+                return OperandType.I32;
+            }
+            else if (type == typeof(long) || type == typeof(ulong))
+            {
+                return OperandType.I64;
+            }
+            else if (type == typeof(double))
+            {
+                return OperandType.FP64;
+            }
+            else if (type == typeof(float))
+            {
+                return OperandType.FP32;
             }
             else if (type == typeof(V128))
             {
@@ -121,8 +140,10 @@ namespace ARMeilleure.Translation
             {
                 return OperandType.None;
             }
-
-            throw new ArgumentException($"Invalid type \"{type.Name}\".");
+            else
+            {
+                throw new ArgumentException($"Invalid type \"{type.Name}\".");
+            }
         }
 
         public Operand Call(Operand address, OperandType returnType, params Operand[] callArgs)
@@ -159,6 +180,16 @@ namespace ARMeilleure.Translation
         public Operand CompareAndSwap(Operand address, Operand expected, Operand desired)
         {
             return Add(Instruction.CompareAndSwap, Local(desired.Type), address, expected, desired);
+        }
+
+        public Operand CompareAndSwap16(Operand address, Operand expected, Operand desired)
+        {
+            return Add(Instruction.CompareAndSwap16, Local(OperandType.I32), address, expected, desired);
+        }
+
+        public Operand CompareAndSwap8(Operand address, Operand expected, Operand desired)
+        {
+            return Add(Instruction.CompareAndSwap8, Local(OperandType.I32), address, expected, desired);
         }
 
         public Operand ConditionalSelect(Operand op1, Operand op2, Operand op3)
@@ -206,11 +237,6 @@ namespace ARMeilleure.Translation
             return Add(Instruction.CountLeadingZeros, Local(op1.Type), op1);
         }
 
-        internal Operand CpuId()
-        {
-            return Add(Instruction.CpuId, Local(OperandType.I64));
-        }
-
         public Operand Divide(Operand op1, Operand op2)
         {
             return Add(Instruction.Divide, Local(op1.Type), op1, op2);
@@ -221,54 +247,59 @@ namespace ARMeilleure.Translation
             return Add(Instruction.DivideUI, Local(op1.Type), op1, op2);
         }
 
+        public Operand ICompare(Operand op1, Operand op2, Comparison comp)
+        {
+            return Add(Instruction.Compare, Local(OperandType.I32), op1, op2, Const((int)comp));
+        }
+
         public Operand ICompareEqual(Operand op1, Operand op2)
         {
-            return Add(Instruction.CompareEqual, Local(OperandType.I32), op1, op2);
+            return ICompare(op1, op2, Comparison.Equal);
         }
 
         public Operand ICompareGreater(Operand op1, Operand op2)
         {
-            return Add(Instruction.CompareGreater, Local(OperandType.I32), op1, op2);
+            return ICompare(op1, op2, Comparison.Greater);
         }
 
         public Operand ICompareGreaterOrEqual(Operand op1, Operand op2)
         {
-            return Add(Instruction.CompareGreaterOrEqual, Local(OperandType.I32), op1, op2);
+            return ICompare(op1, op2, Comparison.GreaterOrEqual);
         }
 
         public Operand ICompareGreaterOrEqualUI(Operand op1, Operand op2)
         {
-            return Add(Instruction.CompareGreaterOrEqualUI, Local(OperandType.I32), op1, op2);
+            return ICompare(op1, op2, Comparison.GreaterOrEqualUI);
         }
 
         public Operand ICompareGreaterUI(Operand op1, Operand op2)
         {
-            return Add(Instruction.CompareGreaterUI, Local(OperandType.I32), op1, op2);
+            return ICompare(op1, op2, Comparison.GreaterUI);
         }
 
         public Operand ICompareLess(Operand op1, Operand op2)
         {
-            return Add(Instruction.CompareLess, Local(OperandType.I32), op1, op2);
+            return ICompare(op1, op2, Comparison.Less);
         }
 
         public Operand ICompareLessOrEqual(Operand op1, Operand op2)
         {
-            return Add(Instruction.CompareLessOrEqual, Local(OperandType.I32), op1, op2);
+            return ICompare(op1, op2, Comparison.LessOrEqual);
         }
 
         public Operand ICompareLessOrEqualUI(Operand op1, Operand op2)
         {
-            return Add(Instruction.CompareLessOrEqualUI, Local(OperandType.I32), op1, op2);
+            return ICompare(op1, op2, Comparison.LessOrEqualUI);
         }
 
         public Operand ICompareLessUI(Operand op1, Operand op2)
         {
-            return Add(Instruction.CompareLessUI, Local(OperandType.I32), op1, op2);
+            return ICompare(op1, op2, Comparison.LessUI);
         }
 
         public Operand ICompareNotEqual(Operand op1, Operand op2)
         {
-            return Add(Instruction.CompareNotEqual, Local(OperandType.I32), op1, op2);
+            return ICompare(op1, op2, Comparison.NotEqual);
         }
 
         public Operand Load(OperandType type, Operand address)
@@ -429,6 +460,11 @@ namespace ARMeilleure.Translation
             return Add(Instruction.VectorInsert8, Local(OperandType.V128), vector, value, Const(index));
         }
 
+        public Operand VectorOne()
+        {
+            return Add(Instruction.VectorOne, Local(OperandType.V128));
+        }
+
         public Operand VectorZero()
         {
             return Add(Instruction.VectorZero, Local(OperandType.V128));
@@ -537,12 +573,14 @@ namespace ARMeilleure.Translation
             return Add(intrin, Local(OperandType.I64), args);
         }
 
+        public void AddIntrinsicNoRet(Intrinsic intrin, params Operand[] args)
+        {
+            Add(intrin, null, args);
+        }
+
         private Operand Add(Intrinsic intrin, Operand dest, params Operand[] sources)
         {
-            if (_needsNewBlock)
-            {
-                NewNextBlock();
-            }
+            NewNextBlockIfNeeded();
 
             IntrinsicOperation operation = new IntrinsicOperation(intrin, dest, sources);
 
@@ -551,7 +589,7 @@ namespace ARMeilleure.Translation
             return dest;
         }
 
-        private void BranchToLabel(Operand label)
+        private void BranchToLabel(Operand label, bool uncond, BasicBlockFrequency nextFreq)
         {
             if (!_irLabels.TryGetValue(label, out BasicBlock branchBlock))
             {
@@ -560,13 +598,24 @@ namespace ARMeilleure.Translation
                 _irLabels.Add(label, branchBlock);
             }
 
-            _irBlock.Branch = branchBlock;
+            if (uncond)
+            {
+                _irBlock.AddSuccessor(branchBlock);
+            }
+            else
+            {
+                // Defer registration of successor to _irBlock so that the order of successors is correct.
+                _ifBlock = branchBlock;
+            }
 
             _needsNewBlock = true;
+            _nextBlockFreq = nextFreq;
         }
 
-        public void MarkLabel(Operand label)
+        public void MarkLabel(Operand label, BasicBlockFrequency nextFreq = default)
         {
+            _nextBlockFreq = nextFreq;
+
             if (_irLabels.TryGetValue(label, out BasicBlock nextBlock))
             {
                 nextBlock.Index = _irBlocks.Count;
@@ -594,27 +643,30 @@ namespace ARMeilleure.Translation
 
         private void NextBlock(BasicBlock nextBlock)
         {
-            if (_irBlock != null && !EndsWithUnconditional(_irBlock))
+            if (_irBlock?.SuccessorCount == 0 && !EndsWithUnconditional(_irBlock))
             {
-                _irBlock.Next = nextBlock;
+                _irBlock.AddSuccessor(nextBlock);
+
+                if (_ifBlock != null)
+                {
+                    _irBlock.AddSuccessor(_ifBlock);
+
+                    _ifBlock = null;
+                }
             }
 
             _irBlock = nextBlock;
+            _irBlock.Frequency = _nextBlockFreq;
 
             _needsNewBlock = false;
+            _nextBlockFreq = BasicBlockFrequency.Default;
         }
 
         private static bool EndsWithUnconditional(BasicBlock block)
         {
-            Operation lastOp = block.GetLastOp() as Operation;
-
-            if (lastOp == null)
-            {
-                return false;
-            }
-
-            return lastOp.Instruction == Instruction.Branch ||
-                   lastOp.Instruction == Instruction.Return;
+            return block.Operations.Last is Operation lastOp &&
+                   (lastOp.Instruction == Instruction.Return ||
+                    lastOp.Instruction == Instruction.Tailcall);
         }
 
         public ControlFlowGraph GetControlFlowGraph()

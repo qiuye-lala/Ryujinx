@@ -1,5 +1,6 @@
 using OpenTK.Graphics.OpenGL;
 using Ryujinx.Graphics.GAL;
+using Ryujinx.Graphics.OpenGL.Image;
 using System;
 
 namespace Ryujinx.Graphics.OpenGL
@@ -12,6 +13,9 @@ namespace Ryujinx.Graphics.OpenGL
 
         private readonly TextureView[] _colors;
 
+        private int _colorsCount;
+        private bool _dualSourceBlend;
+
         public Framebuffer()
         {
             Handle = GL.GenFramebuffer();
@@ -19,9 +23,10 @@ namespace Ryujinx.Graphics.OpenGL
             _colors = new TextureView[8];
         }
 
-        public void Bind()
+        public int Bind()
         {
             GL.BindFramebuffer(FramebufferTarget.Framebuffer, Handle);
+            return Handle;
         }
 
         public void AttachColor(int index, TextureView color)
@@ -95,7 +100,35 @@ namespace Ryujinx.Graphics.OpenGL
             }
         }
 
+        public void SetDualSourceBlend(bool enable)
+        {
+            bool oldEnable = _dualSourceBlend;
+
+            _dualSourceBlend = enable;
+
+            // When dual source blend is used,
+            // we can only have one draw buffer.
+            if (enable)
+            {
+                GL.DrawBuffer(DrawBufferMode.ColorAttachment0);
+            }
+            else if (oldEnable)
+            {
+                SetDrawBuffersImpl(_colorsCount);
+            }
+        }
+
         public void SetDrawBuffers(int colorsCount)
+        {
+            if (_colorsCount != colorsCount && !_dualSourceBlend)
+            {
+                SetDrawBuffersImpl(colorsCount);
+            }
+
+            _colorsCount = colorsCount;
+        }
+
+        private void SetDrawBuffersImpl(int colorsCount)
         {
             DrawBuffersEnum[] drawBuffers = new DrawBuffersEnum[colorsCount];
 

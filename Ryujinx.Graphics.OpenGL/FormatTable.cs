@@ -6,11 +6,15 @@ namespace Ryujinx.Graphics.OpenGL
 {
     struct FormatTable
     {
-        private static FormatInfo[] _table;
+        private static FormatInfo[] Table;
+        private static SizedInternalFormat[] TableImage;
 
         static FormatTable()
         {
-            _table = new FormatInfo[Enum.GetNames(typeof(Format)).Length];
+            int tableSize = Enum.GetNames(typeof(Format)).Length;
+
+            Table = new FormatInfo[tableSize];
+            TableImage = new SizedInternalFormat[tableSize];
 
             Add(Format.R8Unorm,             new FormatInfo(1, true,  false, All.R8,                PixelFormat.Red,            PixelType.UnsignedByte));
             Add(Format.R8Snorm,             new FormatInfo(1, true,  false, All.R8Snorm,           PixelFormat.Red,            PixelType.Byte));
@@ -92,6 +96,8 @@ namespace Ryujinx.Graphics.OpenGL
             Add(Format.Bc7Srgb,             new FormatInfo(1, false, false, All.CompressedSrgbAlphaBptcUnorm));
             Add(Format.Bc6HSfloat,          new FormatInfo(1, false, false, All.CompressedRgbBptcSignedFloat));
             Add(Format.Bc6HUfloat,          new FormatInfo(1, false, false, All.CompressedRgbBptcUnsignedFloat));
+            Add(Format.Etc2RgbaUnorm,       new FormatInfo(1, false, false, All.CompressedRgba8Etc2Eac));
+            Add(Format.Etc2RgbaSrgb,        new FormatInfo(1, false, false, All.CompressedSrgb8Alpha8Etc2Eac));
             Add(Format.R8Uscaled,           new FormatInfo(1, false, true,  All.R8ui,              PixelFormat.RedInteger,     PixelType.UnsignedByte));
             Add(Format.R8Sscaled,           new FormatInfo(1, false, true,  All.R8i,               PixelFormat.RedInteger,     PixelType.Byte));
             Add(Format.R16Uscaled,          new FormatInfo(1, false, true,  All.R16ui,             PixelFormat.RedInteger,     PixelType.UnsignedShort));
@@ -164,20 +170,70 @@ namespace Ryujinx.Graphics.OpenGL
             Add(Format.B5G5R5X1Unorm,       new FormatInfo(4, true,  false, All.Rgb5,              PixelFormat.Bgra,           PixelType.UnsignedShort5551));
             Add(Format.B5G5R5A1Unorm,       new FormatInfo(4, true,  false, All.Rgb5A1,            PixelFormat.Bgra,           PixelType.UnsignedShort5551));
             Add(Format.A1B5G5R5Unorm,       new FormatInfo(4, true,  false, All.Rgb5A1,            PixelFormat.Bgra,           PixelType.UnsignedShort1555Reversed));
-            Add(Format.B8G8R8X8Unorm,       new FormatInfo(4, true,  false, All.Rgba8,             PixelFormat.Bgra,           PixelType.UnsignedByte));
-            Add(Format.B8G8R8A8Unorm,       new FormatInfo(4, true,  false, All.Rgba8,             PixelFormat.Bgra,           PixelType.UnsignedByte));
-            Add(Format.B8G8R8X8Srgb,        new FormatInfo(4, false, false, All.Srgb8,             PixelFormat.BgraInteger,    PixelType.UnsignedByte));
-            Add(Format.B8G8R8A8Srgb,        new FormatInfo(4, false, false, All.Srgb8Alpha8,       PixelFormat.BgraInteger,    PixelType.UnsignedByte));
+            Add(Format.B8G8R8X8Unorm,       new FormatInfo(4, true,  false, All.Rgba8,             PixelFormat.Rgba,           PixelType.UnsignedByte));
+            Add(Format.B8G8R8A8Unorm,       new FormatInfo(4, true,  false, All.Rgba8,             PixelFormat.Rgba,           PixelType.UnsignedByte));
+            Add(Format.B8G8R8X8Srgb,        new FormatInfo(4, false, false, All.Srgb8,             PixelFormat.Rgba,           PixelType.UnsignedByte));
+            Add(Format.B8G8R8A8Srgb,        new FormatInfo(4, false, false, All.Srgb8Alpha8,       PixelFormat.Rgba,           PixelType.UnsignedByte));
+
+            Add(Format.R8Unorm,           SizedInternalFormat.R8);
+            Add(Format.R8Uint,            SizedInternalFormat.R8ui);
+            Add(Format.R8Sint,            SizedInternalFormat.R8i);
+            Add(Format.R16Float,          SizedInternalFormat.R16f);
+            Add(Format.R16Unorm,          SizedInternalFormat.R16);
+            Add(Format.R16Snorm,          (SizedInternalFormat)All.R16Snorm);
+            Add(Format.R16Uint,           SizedInternalFormat.R16ui);
+            Add(Format.R16Sint,           SizedInternalFormat.R16i);
+            Add(Format.R32Float,          SizedInternalFormat.R32f);
+            Add(Format.R32Uint,           SizedInternalFormat.R32ui);
+            Add(Format.R32Sint,           SizedInternalFormat.R32i);
+            Add(Format.R8G8Unorm,         SizedInternalFormat.Rg8);
+            Add(Format.R8G8Snorm,         (SizedInternalFormat)All.Rg8Snorm);
+            Add(Format.R8G8Uint,          SizedInternalFormat.Rg8ui);
+            Add(Format.R8G8Sint,          SizedInternalFormat.Rg8i);
+            Add(Format.R16G16Float,       SizedInternalFormat.Rg16f);
+            Add(Format.R16G16Unorm,       SizedInternalFormat.Rg16);
+            Add(Format.R16G16Snorm,       (SizedInternalFormat)All.Rg16Snorm);
+            Add(Format.R16G16Uint,        SizedInternalFormat.Rg16ui);
+            Add(Format.R16G16Sint,        SizedInternalFormat.Rg16i);
+            Add(Format.R32G32Float,       SizedInternalFormat.Rg32f);
+            Add(Format.R32G32Uint,        SizedInternalFormat.Rg32ui);
+            Add(Format.R32G32Sint,        SizedInternalFormat.Rg32i);
+            Add(Format.R8G8B8A8Unorm,     SizedInternalFormat.Rgba8);
+            Add(Format.R8G8B8A8Snorm,     (SizedInternalFormat)All.Rgba8Snorm);
+            Add(Format.R8G8B8A8Uint,      SizedInternalFormat.Rgba8ui);
+            Add(Format.R8G8B8A8Sint,      SizedInternalFormat.Rgba8i);
+            Add(Format.R16G16B16A16Float, SizedInternalFormat.Rgba16f);
+            Add(Format.R16G16B16A16Unorm, SizedInternalFormat.Rgba16);
+            Add(Format.R16G16B16A16Snorm, (SizedInternalFormat)All.Rgba16Snorm);
+            Add(Format.R16G16B16A16Uint,  SizedInternalFormat.Rgba16ui);
+            Add(Format.R16G16B16A16Sint,  SizedInternalFormat.Rgba16i);
+            Add(Format.R32G32B32A32Float, SizedInternalFormat.Rgba32f);
+            Add(Format.R32G32B32A32Uint,  SizedInternalFormat.Rgba32ui);
+            Add(Format.R32G32B32A32Sint,  SizedInternalFormat.Rgba32i);
+            Add(Format.R8G8B8A8Srgb,      SizedInternalFormat.Rgba8);
+            Add(Format.R10G10B10A2Unorm,  (SizedInternalFormat)All.Rgb10A2);
+            Add(Format.R10G10B10A2Uint,   (SizedInternalFormat)All.Rgb10A2ui);
+            Add(Format.R11G11B10Float,    (SizedInternalFormat)All.R11fG11fB10f);
         }
 
         private static void Add(Format format, FormatInfo info)
         {
-            _table[(int)format] = info;
+            Table[(int)format] = info;
+        }
+
+        private static void Add(Format format, SizedInternalFormat sif)
+        {
+            TableImage[(int)format] = sif;
         }
 
         public static FormatInfo GetFormatInfo(Format format)
         {
-            return _table[(int)format];
+            return Table[(int)format];
+        }
+
+        public static SizedInternalFormat GetImageFormat(Format format)
+        {
+            return TableImage[(int)format];
         }
     }
 }

@@ -32,7 +32,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Nsd.Manager
                     return ResultCode.Success;
                 }
 
+#pragma warning disable CS0162
                 return ResultCode.NullOutputObject;
+#pragma warning restore CS0162
             }
         }
 
@@ -108,8 +110,11 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Nsd.Manager
         {
             (long inputPosition, long inputSize)  = context.Request.GetBufferType0x21();
 
-            byte[] addressBuffer = context.Memory.ReadBytes(inputPosition, inputSize);
-            string address       = Encoding.UTF8.GetString(addressBuffer);
+            byte[] addressBuffer = new byte[inputSize];
+
+            context.Memory.Read((ulong)inputPosition, addressBuffer);
+
+            string address = Encoding.UTF8.GetString(addressBuffer);
 
             resultCode = Resolve(context, address, out resolvedAddress);
 

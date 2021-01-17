@@ -13,27 +13,34 @@ namespace Ryujinx.Graphics.Gpu.Engine
         /// <param name="argument">Method call argument</param>
         private void Clear(GpuState state, int argument)
         {
-            if (!GetRenderEnable(state))
+            ConditionalRenderEnabled renderEnable = GetRenderEnable(state);
+
+            if (renderEnable == ConditionalRenderEnabled.False)
             {
                 return;
             }
 
-            // Scissor affects clears aswell.
+            // Scissor and rasterizer discard also affect clears.
             if (state.QueryModified(MethodOffset.ScissorState))
             {
                 UpdateScissorState(state);
             }
 
-            UpdateRenderTargetState(state, useControl: false);
+            if (state.QueryModified(MethodOffset.RasterizeEnable))
+            {
+                UpdateRasterizerState(state);
+            }
 
-            TextureManager.CommitGraphicsBindings();
+            int index = (argument >> 6) & 0xf;
+
+            UpdateRenderTargetState(state, useControl: false, singleUse: index);
+
+            TextureManager.UpdateRenderTargets();
 
             bool clearDepth   = (argument & 1) != 0;
             bool clearStencil = (argument & 2) != 0;
 
             uint componentMask = (uint)((argument >> 2) & 0xf);
-
-            int index = (argument >> 6) & 0xf;
 
             if (componentMask != 0)
             {
@@ -68,6 +75,11 @@ namespace Ryujinx.Graphics.Gpu.Engine
             }
 
             UpdateRenderTargetState(state, useControl: true);
+
+            if (renderEnable == ConditionalRenderEnabled.Host)
+            {
+                _context.Renderer.Pipeline.EndHostConditionalRendering();
+            }
         }
     }
 }

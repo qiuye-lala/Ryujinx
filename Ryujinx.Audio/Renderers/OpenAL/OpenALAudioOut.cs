@@ -38,16 +38,6 @@ namespace Ryujinx.Audio
         private Thread _audioPollerThread;
 
         /// <summary>
-        /// The volume of audio renderer
-        /// </summary>
-        private float _volume = 1.0f;
-
-        /// <summary>
-        /// True if the volume of audio renderer have changed
-        /// </summary>
-        private bool _volumeChanged;
-
-        /// <summary>
         /// True if OpenAL is supported on the device
         /// </summary>
         public static bool IsSupported
@@ -104,15 +94,24 @@ namespace Ryujinx.Audio
             _context.Dispose();
         }
 
+        public bool SupportsChannelCount(int channels)
+        {
+            // NOTE: OpenAL doesn't give us a way to know if the 5.1 setup is supported by hardware or actually emulated.
+            // TODO: find a way to determine hardware support.
+            return channels == 1 || channels == 2;
+        }
+
         /// <summary>
         /// Creates a new audio track with the specified parameters
         /// </summary>
         /// <param name="sampleRate">The requested sample rate</param>
-        /// <param name="channels">The requested channels</param>
+        /// <param name="hardwareChannels">The requested hardware channels</param>
+        /// <param name="virtualChannels">The requested virtual channels</param>
         /// <param name="callback">A <see cref="ReleaseCallback" /> that represents the delegate to invoke when a buffer has been released by the audio track</param>
-        public int OpenTrack(int sampleRate, int channels, ReleaseCallback callback)
+        /// <returns>The created track's Track ID</returns>
+        public int OpenHardwareTrack(int sampleRate, int hardwareChannels, int virtualChannels, ReleaseCallback callback)
         {
-            OpenALAudioTrack track = new OpenALAudioTrack(sampleRate, GetALFormat(channels), callback);
+            OpenALAudioTrack track = new OpenALAudioTrack(sampleRate, GetALFormat(hardwareChannels), hardwareChannels, virtualChannels, callback);
 
             for (int id = 0; id < MaxTracks; id++)
             {
@@ -204,13 +203,43 @@ namespace Ryujinx.Audio
                 {
                     int bufferId = track.AppendBuffer(bufferTag);
 
-                    int size = buffer.Length * Marshal.SizeOf<T>();
+                    // Do we need to downmix?
+                    if (track.HardwareChannels != track.VirtualChannels)
+                    {
+                        short[] downmixedBuffer;
 
-                    AL.BufferData(bufferId, track.Format, buffer, size, track.SampleRate);
+                        ReadOnlySpan<short> bufferPCM16 = MemoryMarshal.Cast<T, short>(buffer);
+
+                        if (track.VirtualChannels == 6)
+                        {
+                            downmixedBuffer = Downmixing.DownMixSurroundToStereo(bufferPCM16);
+
+                            if (track.HardwareChannels == 1)
+                            {
+                                downmixedBuffer = Downmixing.DownMixStereoToMono(downmixedBuffer);
+                            }
+                        }
+                        else if (track.VirtualChannels == 2)
+                        {
+                            downmixedBuffer = Downmixing.DownMixStereoToMono(bufferPCM16);
+                        }
+                        else
+                        {
+                            throw new NotImplementedException($"Downmixing from {track.VirtualChannels} to {track.HardwareChannels} not implemented!");
+                        }
+
+                        AL.BufferData(bufferId, track.Format, downmixedBuffer, downmixedBuffer.Length * sizeof(ushort), track.SampleRate);
+                    }
+                    else
+                    {
+                        AL.BufferData(bufferId, track.Format, buffer, buffer.Length * sizeof(ushort), track.SampleRate);
+                    }
 
                     AL.SourceQueueBuffer(track.SourceId, bufferId);
 
                     StartPlaybackIfNeeded(track);
+
+                    track.PlayedSampleCount += (ulong)buffer.Length;
                 }
             }
         }
@@ -240,13 +269,6 @@ namespace Ryujinx.Audio
 
             if (State != ALSourceState.Playing && track.State == PlaybackState.Playing)
             {
-                if (_volumeChanged)
-                {
-                    AL.Source(track.SourceId, ALSourcef.Gain, _volume);
-
-                    _volumeChanged = false;
-                }
-
                 AL.SourcePlay(track.SourceId);
             }
         }
@@ -269,21 +291,87 @@ namespace Ryujinx.Audio
         }
 
         /// <summary>
-        /// Get playback volume
+        /// Get track buffer count
         /// </summary>
-        public float GetVolume() => _volume;
+        /// <param name="trackId">The ID of the track to get buffer count</param>
+        public uint GetBufferCount(int trackId)
+        {
+            if (_tracks.TryGetValue(trackId, out OpenALAudioTrack track))
+            {
+                lock (track)
+                {
+                    return track.BufferCount;
+                }
+            }
+
+            return 0;
+        }
 
         /// <summary>
-        /// Set playback volume
+        /// Get track played sample count
         /// </summary>
-        /// <param name="volume">The volume of the playback</param>
-        public void SetVolume(float volume)
+        /// <param name="trackId">The ID of the track to get played sample count</param>
+        public ulong GetPlayedSampleCount(int trackId)
         {
-            if (!_volumeChanged)
+            if (_tracks.TryGetValue(trackId, out OpenALAudioTrack track))
             {
-                _volume        = volume;
-                _volumeChanged = true;
+                lock (track)
+                {
+                    return track.PlayedSampleCount;
+                }
             }
+
+            return 0;
+        }
+
+        /// <summary>
+        /// Flush all track buffers
+        /// </summary>
+        /// <param name="trackId">The ID of the track to flush</param>
+        public bool FlushBuffers(int trackId)
+        {
+            if (_tracks.TryGetValue(trackId, out OpenALAudioTrack track))
+            {
+                lock (track)
+                {
+                    track.FlushBuffers();
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Set track volume
+        /// </summary>
+        /// <param name="trackId">The ID of the track to set volume</param>
+        /// <param name="volume">The volume of the track</param>
+        public void SetVolume(int trackId, float volume)
+        {
+            if (_tracks.TryGetValue(trackId, out OpenALAudioTrack track))
+            {
+                lock (track)
+                {
+                    track.SetVolume(volume);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Get track volume
+        /// </summary>
+        /// <param name="trackId">The ID of the track to get volume</param>
+        public float GetVolume(int trackId)
+        {
+            if (_tracks.TryGetValue(trackId, out OpenALAudioTrack track))
+            {
+                lock (track)
+                {
+                    return track.GetVolume();
+                }
+            }
+
+            return 1.0f;
         }
 
         /// <summary>

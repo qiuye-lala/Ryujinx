@@ -136,6 +136,16 @@ namespace Ryujinx.Graphics.Shader.Translation
             return context.Add(Instruction.BranchIfTrue, d, a);
         }
 
+        public static Operand Call(this EmitterContext context, int funcId, bool returns, params Operand[] args)
+        {
+            Operand[] args2 = new Operand[args.Length + 1];
+
+            args2[0] = Const(funcId);
+            args.CopyTo(args2, 1);
+
+            return context.Add(Instruction.Call, returns ? Local() : null, args2);
+        }
+
         public static Operand ConditionalSelect(this EmitterContext context, Operand a, Operand b, Operand c)
         {
             return context.Add(Instruction.ConditionalSelect, Local(), a, b, c);
@@ -396,9 +406,39 @@ namespace Ryujinx.Graphics.Shader.Translation
             return context.Add(Instruction.CompareEqual, Local(), a, b);
         }
 
+        public static Operand ICompareGreater(this EmitterContext context, Operand a, Operand b)
+        {
+            return context.Add(Instruction.CompareGreater, Local(), a, b);
+        }
+
+        public static Operand ICompareGreaterOrEqual(this EmitterContext context, Operand a, Operand b)
+        {
+            return context.Add(Instruction.CompareGreaterOrEqual, Local(), a, b);
+        }
+
+        public static Operand ICompareGreaterOrEqualUnsigned(this EmitterContext context, Operand a, Operand b)
+        {
+            return context.Add(Instruction.CompareGreaterOrEqualU32, Local(), a, b);
+        }
+
+        public static Operand ICompareGreaterUnsigned(this EmitterContext context, Operand a, Operand b)
+        {
+            return context.Add(Instruction.CompareGreaterU32, Local(), a, b);
+        }
+
         public static Operand ICompareLess(this EmitterContext context, Operand a, Operand b)
         {
             return context.Add(Instruction.CompareLess, Local(), a, b);
+        }
+
+        public static Operand ICompareLessOrEqual(this EmitterContext context, Operand a, Operand b)
+        {
+            return context.Add(Instruction.CompareLessOrEqual, Local(), a, b);
+        }
+
+        public static Operand ICompareLessOrEqualUnsigned(this EmitterContext context, Operand a, Operand b)
+        {
+            return context.Add(Instruction.CompareLessOrEqualU32, Local(), a, b);
         }
 
         public static Operand ICompareLessUnsigned(this EmitterContext context, Operand a, Operand b)
@@ -521,11 +561,16 @@ namespace Ryujinx.Graphics.Shader.Translation
             return context.Add(Instruction.PackHalf2x16, Local(), a, b);
         }
 
-        public static Operand Return(this EmitterContext context)
+        public static void Return(this EmitterContext context)
         {
             context.PrepareForReturn();
+            context.Add(Instruction.Return);
+        }
 
-            return context.Add(Instruction.Return);
+        public static void Return(this EmitterContext context, Operand returnValue)
+        {
+            context.PrepareForReturn();
+            context.Add(Instruction.Return, null, returnValue);
         }
 
         public static Operand ShiftLeft(this EmitterContext context, Operand a, Operand b)

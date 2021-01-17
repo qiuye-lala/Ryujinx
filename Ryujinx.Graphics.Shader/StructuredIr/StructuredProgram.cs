@@ -2,54 +2,112 @@ using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.Translation;
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 
 namespace Ryujinx.Graphics.Shader.StructuredIr
 {
     static class StructuredProgram
     {
-        public static StructuredProgramInfo MakeStructuredProgram(BasicBlock[] blocks, ShaderConfig config)
+        public static StructuredProgramInfo MakeStructuredProgram(Function[] functions, ShaderConfig config)
         {
-            PhiFunctions.Remove(blocks);
+            StructuredProgramContext context = new StructuredProgramContext(config);
 
-            StructuredProgramContext context = new StructuredProgramContext(blocks.Length, config);
-
-            for (int blkIndex = 0; blkIndex < blocks.Length; blkIndex++)
+            for (int funcIndex = 0; funcIndex < functions.Length; funcIndex++)
             {
-                BasicBlock block = blocks[blkIndex];
+                Function function = functions[funcIndex];
 
-                context.EnterBlock(block);
+                BasicBlock[] blocks = function.Blocks;
 
-                foreach (INode node in block.Operations)
+                VariableType returnType = function.ReturnsValue ? VariableType.S32 : VariableType.None;
+
+                VariableType[] inArguments  = new VariableType[function.InArgumentsCount];
+                VariableType[] outArguments = new VariableType[function.OutArgumentsCount];
+
+                for (int i = 0; i < inArguments.Length; i++)
                 {
-                    Operation operation = (Operation)node;
+                    inArguments[i] = VariableType.S32;
+                }
 
-                    if (IsBranchInst(operation.Inst))
+                for (int i = 0; i < outArguments.Length; i++)
+                {
+                    outArguments[i] = VariableType.S32;
+                }
+
+                context.EnterFunction(blocks.Length, function.Name, returnType, inArguments, outArguments);
+
+                PhiFunctions.Remove(blocks);
+
+                for (int blkIndex = 0; blkIndex < blocks.Length; blkIndex++)
+                {
+                    BasicBlock block = blocks[blkIndex];
+
+                    context.EnterBlock(block);
+
+                    for (LinkedListNode<INode> opNode = block.Operations.First; opNode != null; opNode = opNode.Next)
                     {
-                        context.LeaveBlock(block, operation);
-                    }
-                    else
-                    {
-                        AddOperation(context, operation);
+                        Operation operation = (Operation)opNode.Value;
+
+                        if (IsBranchInst(operation.Inst))
+                        {
+                            context.LeaveBlock(block, operation);
+                        }
+                        else if (operation.Inst != Instruction.CallOutArgument)
+                        {
+                            AddOperation(context, opNode);
+                        }
                     }
                 }
+
+                GotoElimination.Eliminate(context.GetGotos());
+
+                AstOptimizer.Optimize(context);
+
+                context.LeaveFunction();
             }
-
-            GotoElimination.Eliminate(context.GetGotos());
-
-            AstOptimizer.Optimize(context);
 
             return context.Info;
         }
 
-        private static void AddOperation(StructuredProgramContext context, Operation operation)
+        private static void AddOperation(StructuredProgramContext context, LinkedListNode<INode> opNode)
         {
+            Operation operation = (Operation)opNode.Value;
+
             Instruction inst = operation.Inst;
 
-            IAstNode[] sources = new IAstNode[operation.SourcesCount];
+            bool isCall = inst == Instruction.Call;
 
-            for (int index = 0; index < sources.Length; index++)
+            int sourcesCount = operation.SourcesCount;
+
+            List<Operand> callOutOperands = new List<Operand>();
+
+            if (isCall)
+            {
+                LinkedListNode<INode> scan = opNode.Next;
+
+                while (scan != null && scan.Value is Operation nextOp && nextOp.Inst == Instruction.CallOutArgument)
+                {
+                    callOutOperands.Add(nextOp.Dest);
+                    scan = scan.Next;
+                }
+
+                sourcesCount += callOutOperands.Count;
+            }
+
+            IAstNode[] sources = new IAstNode[sourcesCount];
+
+            for (int index = 0; index < operation.SourcesCount; index++)
             {
                 sources[index] = context.GetOperandUse(operation.GetSource(index));
+            }
+
+            if (isCall)
+            {
+                for (int index = 0; index < callOutOperands.Count; index++)
+                {
+                    sources[operation.SourcesCount + index] = context.GetOperandDef(callOutOperands[index]);
+                }
+
+                callOutOperands.Clear();
             }
 
             AstTextureOperation GetAstTextureOperation(TextureOperation texOp)
@@ -59,6 +117,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     texOp.Type,
                     texOp.Format,
                     texOp.Flags,
+                    texOp.CbufSlot,
                     texOp.Handle,
                     4, // TODO: Non-hardcoded array size.
                     texOp.Index,
@@ -73,19 +132,29 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 {
                     Operand slot = operation.GetSource(0);
 
-                    if (slot.Type != OperandType.Constant)
+                    if (slot.Type == OperandType.Constant)
                     {
-                        throw new InvalidOperationException("Found load with non-constant constant buffer slot.");
+                        context.Info.CBuffers.Add(slot.Value);
                     }
+                    else
+                    {
+                        // If the value is not constant, then we don't know
+                        // how many constant buffers are used, so we assume
+                        // all of them are used.
+                        int cbCount = 32 - BitOperations.LeadingZeroCount(context.Config.GpuAccessor.QueryConstantBufferUse());
 
-                    context.Info.CBuffers.Add(slot.Value);
+                        for (int index = 0; index < cbCount; index++)
+                        {
+                            context.Info.CBuffers.Add(index);
+                        }
+
+                        context.Info.UsesCbIndexing = true;
+                    }
                 }
                 else if (UsesStorage(inst))
                 {
                     AddSBufferUse(context.Info.SBuffers, operation);
                 }
-
-                AstAssignment assignment;
 
                 // If all the sources are bool, it's better to use short-circuiting
                 // logical operations, rather than forcing a cast to int and doing
@@ -139,16 +208,14 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 }
                 else if (!isCopy)
                 {
-                    source = new AstOperation(inst, operation.Index, sources);
+                    source = new AstOperation(inst, operation.Index, sources, operation.SourcesCount);
                 }
                 else
                 {
                     source = sources[0];
                 }
 
-                assignment = new AstAssignment(dest, source);
-
-                context.AddNode(assignment);
+                context.AddNode(new AstAssignment(dest, source));
             }
             else if (operation.Inst == Instruction.Comment)
             {
@@ -169,7 +236,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     AddSBufferUse(context.Info.SBuffers, operation);
                 }
 
-                context.AddNode(new AstOperation(inst, operation.Index, sources));
+                context.AddNode(new AstOperation(inst, operation.Index, sources, operation.SourcesCount));
             }
 
             // Those instructions needs to be emulated by using helper functions,

@@ -1,5 +1,6 @@
 ﻿using Ryujinx.Common.Logging;
 using Ryujinx.HLE.HOS.Services.SurfaceFlinger.Types;
+using Ryujinx.HLE.HOS.Services.Time.Clock;
 using System;
 
 namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
@@ -19,7 +20,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
             {
                 int numAcquiredBuffers = 0;
 
-                for (int i = 0; i < Core.Slots.Length; i++)
+                for (int i = 0; i < Core.MaxBufferCountCached; i++)
                 {
                     if (Core.Slots[i].BufferState == BufferState.Acquired)
                     {
@@ -27,11 +28,11 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
                     }
                 }
 
-                if (numAcquiredBuffers >= Core.MaxAcquiredBufferCount + 1)
+                if (numAcquiredBuffers > Core.MaxAcquiredBufferCount)
                 {
                     bufferItem = null;
 
-                    Logger.PrintDebug(LogClass.SurfaceFlinger, $"Max acquired buffer count reached: {numAcquiredBuffers} (max: {Core.MaxAcquiredBufferCount})");
+                    Logger.Debug?.Print(LogClass.SurfaceFlinger, $"Max acquired buffer count reached: {numAcquiredBuffers} (max: {Core.MaxAcquiredBufferCount})");
 
                     return Status.InvalidOperation;
                 }
@@ -57,6 +58,18 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
                     Core.Slots[bufferItem.Slot].NeedsCleanupOnRelease = true;
                     Core.Slots[bufferItem.Slot].BufferState           = BufferState.Acquired;
                     Core.Slots[bufferItem.Slot].Fence                 = AndroidFence.NoFence;
+
+                    ulong targetFrameNumber = Core.Slots[bufferItem.Slot].FrameNumber;
+
+                    for (int i = 0; i < Core.BufferHistory.Length; i++)
+                    {
+                        if (Core.BufferHistory[i].FrameNumber == targetFrameNumber)
+                        {
+                            Core.BufferHistory[i].State = BufferState.Acquired;
+
+                            break;
+                        }
+                    }
                 }
 
                 if (bufferItem.AcquireCalled)
@@ -89,7 +102,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
 
                 if (!Core.Slots[slot].RequestBufferCalled)
                 {
-                    Logger.PrintError(LogClass.SurfaceFlinger, $"Slot {slot} was detached without requesting a buffer");
+                    Logger.Error?.Print(LogClass.SurfaceFlinger, $"Slot {slot} was detached without requesting a buffer");
 
                     return Status.BadValue;
                 }
@@ -128,7 +141,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
                 {
                     slot = BufferSlotArray.InvalidBufferSlot;
 
-                    Logger.PrintError(LogClass.SurfaceFlinger, $"Max acquired buffer count reached: {numAcquiredBuffers} (max: {Core.MaxAcquiredBufferCount})");
+                    Logger.Error?.Print(LogClass.SurfaceFlinger, $"Max acquired buffer count reached: {numAcquiredBuffers} (max: {Core.MaxAcquiredBufferCount})");
 
                     return Status.InvalidOperation;
                 }
@@ -139,6 +152,8 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
 
                     return Status.NoMemory;
                 }
+
+                Core.UpdateMaxBufferCountCachedLocked(freeSlot);
 
                 slot = freeSlot;
 
@@ -364,6 +379,39 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
             lock (Core.Lock)
             {
                 Core.TransformHint = transformHint;
+            }
+
+            return Status.Success;
+        }
+
+        public Status SetPresentTime(int slot, ulong frameNumber, TimeSpanType presentationTime)
+        {
+            if (slot < 0 || slot >= Core.Slots.Length)
+            {
+                return Status.BadValue;
+            }
+
+            lock (Core.Lock)
+            {
+                if (Core.Slots[slot].FrameNumber != frameNumber)
+                {
+                    return Status.StaleBufferSlot;
+                }
+
+                if (Core.Slots[slot].PresentationTime.NanoSeconds == 0)
+                {
+                    Core.Slots[slot].PresentationTime = presentationTime;
+                }
+
+                for (int i = 0; i < Core.BufferHistory.Length; i++)
+                {
+                    if (Core.BufferHistory[i].FrameNumber == frameNumber)
+                    {
+                        Core.BufferHistory[i].PresentationTime = presentationTime;
+
+                        break;
+                    }
+                }
             }
 
             return Status.Success;

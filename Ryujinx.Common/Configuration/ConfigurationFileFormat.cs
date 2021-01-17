@@ -1,15 +1,10 @@
-using JsonPrettyPrinterPlus;
-using Ryujinx.Common.Logging;
-using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text;
-using Utf8Json;
-using Utf8Json.Resolvers;
-using Ryujinx.Configuration.System;
-using Ryujinx.Configuration.Hid;
+using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Configuration.Hid;
-using Ryujinx.UI.Input;
+using Ryujinx.Common.Logging;
+using Ryujinx.Common.Utilities;
+using Ryujinx.Configuration.System;
 using Ryujinx.Configuration.Ui;
 
 namespace Ryujinx.Configuration
@@ -19,14 +14,29 @@ namespace Ryujinx.Configuration
         /// <summary>
         /// The current version of the file format
         /// </summary>
-        public const int CurrentVersion = 5;
+        public const int CurrentVersion = 20;
 
         public int Version { get; set; }
+
+        /// <summary>
+        /// Resolution Scale. An integer scale applied to applicable render targets. Values 1-4, or -1 to use a custom floating point scale instead.
+        /// </summary>
+        public int ResScale { get; set; }
+
+        /// <summary>
+        /// Custom Resolution Scale. A custom floating point scale applied to applicable render targets. Only active when Resolution Scale is -1.
+        /// </summary>
+        public float ResScaleCustom { get; set; }
 
         /// <summary>
         /// Max Anisotropy. Values range from 0 - 16. Set to -1 to let the game decide.
         /// </summary>
         public float MaxAnisotropy { get; set; }
+
+        /// <summary>
+        /// Aspect Ratio applied to the renderer window.
+        /// </summary>
+        public AspectRatio AspectRatio { get; set; }
 
         /// <summary>
         /// Dumps shaders in this local directory
@@ -74,6 +84,11 @@ namespace Ryujinx.Configuration
         public LogClass[] LoggingFilteredClasses { get; set; }
 
         /// <summary>
+        /// Change Graphics API debug log level
+        /// </summary>
+        public GraphicsDebugLevel LoggingGraphicsDebugLevel { get; set; }
+
+        /// <summary>
         /// Enables or disables logging to a file on disk
         /// </summary>
         public bool EnableFileLog { get; set; }
@@ -109,14 +124,34 @@ namespace Ryujinx.Configuration
         public bool EnableDiscordIntegration { get; set; }
 
         /// <summary>
+        /// Checks for updates when Ryujinx starts when enabled
+        /// </summary>
+        public bool CheckUpdatesOnStart { get; set; }
+
+        /// <summary>
+        /// Show "Confirm Exit" Dialog
+        /// </summary>
+        public bool ShowConfirmExit { get; set; }
+
+        /// <summary>
         /// Enables or disables Vertical Sync
         /// </summary>
         public bool EnableVsync { get; set; }
 
         /// <summary>
+        /// Enables or disables Shader cache
+        /// </summary>
+        public bool EnableShaderCache { get; set; }
+
+        /// <summary>
         /// Enables or disables multi-core scheduling of threads
         /// </summary>
         public bool EnableMulticoreScheduling { get; set; }
+
+        /// <summary>
+        /// Enables or disables profiled translation cache persistency
+        /// </summary>
+        public bool EnablePtc { get; set; }
 
         /// <summary>
         /// Enables integrity checks on Game content files
@@ -129,19 +164,24 @@ namespace Ryujinx.Configuration
         public int FsGlobalAccessLogMode { get; set; }
 
         /// <summary>
+        /// The selected audio backend
+        /// </summary>
+        public AudioBackend AudioBackend { get; set; }
+
+        /// <summary>
         /// Enable or disable ignoring missing services
         /// </summary>
         public bool IgnoreMissingServices { get; set; }
 
         /// <summary>
-        ///  The primary controller's type
-        /// </summary>
-        public ControllerType ControllerType { get; set; }
-
-        /// <summary>
         /// Used to toggle columns in the GUI
         /// </summary>
         public GuiColumns GuiColumns { get; set; }
+
+        /// <summary>
+        /// Used to configure column sort settings in the GUI
+        /// </summary>
+        public ColumnSort ColumnSort { get; set; }
 
         /// <summary>
         /// A list of directories containing games to be used to load games into the games list
@@ -159,19 +199,29 @@ namespace Ryujinx.Configuration
         public string CustomThemePath { get; set; }
 
         /// <summary>
+        /// Start games in fullscreen mode
+        /// </summary>
+        public bool StartFullscreen { get; set; }
+
+        /// <summary>
         /// Enable or disable keyboard support (Independent from controllers binding)
         /// </summary>
         public bool EnableKeyboard { get; set; }
 
         /// <summary>
+        /// Hotkey Keyboard Bindings
+        /// </summary>
+        public KeyboardHotkeys Hotkeys { get; set; }
+
+        /// <summary>
         /// Keyboard control bindings
         /// </summary>
-        public NpadKeyboard KeyboardControls { get; set; }
+        public List<KeyboardConfig> KeyboardConfig { get; set; }
 
         /// <summary>
         /// Controller control bindings
         /// </summary>
-        public NpadController JoystickControls { get; set; }
+        public List<ControllerConfig> ControllerConfig { get; set; }
 
         /// <summary>
         /// Loads a configuration file from disk
@@ -179,15 +229,7 @@ namespace Ryujinx.Configuration
         /// <param name="path">The path to the JSON configuration file</param>
         public static ConfigurationFileFormat Load(string path)
         {
-            var resolver = CompositeResolver.Create(
-                new[] { new ConfigurationEnumFormatter<Key>() },
-                new[] { StandardResolver.AllowPrivateSnakeCase }
-            );
-
-            using (Stream stream = File.OpenRead(path))
-            {
-                return JsonSerializer.Deserialize<ConfigurationFileFormat>(stream, resolver);
-            }
+            return JsonHelper.DeserializeFromFile<ConfigurationFileFormat>(path);
         }
 
         /// <summary>
@@ -196,41 +238,7 @@ namespace Ryujinx.Configuration
         /// <param name="path">The path to the JSON configuration file</param>
         public void SaveConfig(string path)
         {
-            IJsonFormatterResolver resolver = CompositeResolver.Create(
-                new[] { new ConfigurationEnumFormatter<Key>()  },
-                new[] { StandardResolver.AllowPrivateSnakeCase }
-            );
-
-            byte[] data = JsonSerializer.Serialize(this, resolver);
-            File.WriteAllText(path, Encoding.UTF8.GetString(data, 0, data.Length).PrettyPrintJson());
-        }
-
-        public class ConfigurationEnumFormatter<T> : IJsonFormatter<T>
-            where T : struct
-        {
-            public void Serialize(ref JsonWriter writer, T value, IJsonFormatterResolver formatterResolver)
-            {
-                formatterResolver.GetFormatterWithVerify<string>()
-                                 .Serialize(ref writer, value.ToString(), formatterResolver);
-            }
-
-            public T Deserialize(ref JsonReader reader, IJsonFormatterResolver formatterResolver)
-            {
-                if (reader.ReadIsNull())
-                {
-                    return default(T);
-                }
-
-                string enumName = formatterResolver.GetFormatterWithVerify<string>()
-                                                   .Deserialize(ref reader, formatterResolver);
-
-                if (Enum.TryParse<T>(enumName, out T result))
-                {
-                    return result;
-                }
-
-                return default(T);
-            }
+            File.WriteAllText(path, JsonHelper.Serialize(this, true));
         }
     }
 }

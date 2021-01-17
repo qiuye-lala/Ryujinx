@@ -1,6 +1,6 @@
-using ARMeilleure.Memory;
 using Ryujinx.Audio;
 using Ryujinx.Common.Logging;
+using Ryujinx.Cpu;
 using Ryujinx.HLE.HOS.Kernel.Threading;
 using Ryujinx.HLE.HOS.Services.Audio.AudioOutManager;
 using System.Text;
@@ -14,16 +14,13 @@ namespace Ryujinx.HLE.HOS.Services.Audio
         private const int    DefaultSampleRate    = 48000;
         private const int    DefaultChannelsCount = 2;
 
-        public IAudioOutManager(ServiceCtx context) { }
+        public IAudioOutManager(ServiceCtx context) : base(context.Device.System.AudOutServer) { }
 
         [Command(0)]
         // ListAudioOuts() -> (u32 count, buffer<bytes, 6>)
         public ResultCode ListAudioOuts(ServiceCtx context)
         {
-            return ListAudioOutsImpl(
-                context,
-                context.Request.ReceiveBuff[0].Position,
-                context.Request.ReceiveBuff[0].Size);
+            return ListAudioOutsImpl(context, context.Request.ReceiveBuff[0].Position, context.Request.ReceiveBuff[0].Size);
         }
 
         [Command(1)]
@@ -31,12 +28,8 @@ namespace Ryujinx.HLE.HOS.Services.Audio
         // -> (u32 sample_rate, u32 channel_count, u32 pcm_format, u32, object<nn::audio::detail::IAudioOut>, buffer<bytes, 6> name_out)
         public ResultCode OpenAudioOut(ServiceCtx context)
         {
-            return OpenAudioOutImpl(
-                context,
-                context.Request.SendBuff[0].Position,
-                context.Request.SendBuff[0].Size,
-                context.Request.ReceiveBuff[0].Position,
-                context.Request.ReceiveBuff[0].Size);
+            return OpenAudioOutImpl(context, context.Request.SendBuff[0].Position,    context.Request.SendBuff[0].Size,
+                                             context.Request.ReceiveBuff[0].Position, context.Request.ReceiveBuff[0].Size);
         }
 
         [Command(2)] // 3.0.0+
@@ -56,12 +49,7 @@ namespace Ryujinx.HLE.HOS.Services.Audio
             (long sendPosition, long sendSize) = context.Request.GetBufferType0x21();
             (long recvPosition, long recvSize) = context.Request.GetBufferType0x22();
 
-            return OpenAudioOutImpl(
-                context,
-                sendPosition,
-                sendSize,
-                recvPosition,
-                recvSize);
+            return OpenAudioOutImpl(context, sendPosition, sendSize, recvPosition, recvSize);
         }
 
         private ResultCode ListAudioOutsImpl(ServiceCtx context, long position, long size)
@@ -72,13 +60,13 @@ namespace Ryujinx.HLE.HOS.Services.Audio
 
             if ((ulong)deviceNameBuffer.Length <= (ulong)size)
             {
-                context.Memory.WriteBytes(position, deviceNameBuffer);
+                context.Memory.Write((ulong)position, deviceNameBuffer);
 
                 nameCount++;
             }
             else
             {
-                Logger.PrintError(LogClass.ServiceAudio, $"Output buffer size {size} too small!");
+                Logger.Error?.Print(LogClass.ServiceAudio, $"Output buffer size {size} too small!");
             }
 
             context.ResponseData.Write(nameCount);
@@ -88,10 +76,7 @@ namespace Ryujinx.HLE.HOS.Services.Audio
 
         private ResultCode OpenAudioOutImpl(ServiceCtx context, long sendPosition, long sendSize, long receivePosition, long receiveSize)
         {
-            string deviceName = MemoryHelper.ReadAsciiString(
-                context.Memory,
-                sendPosition,
-                sendSize);
+            string deviceName = MemoryHelper.ReadAsciiString(context.Memory, sendPosition, sendSize);
 
             if (deviceName == string.Empty)
             {
@@ -100,7 +85,7 @@ namespace Ryujinx.HLE.HOS.Services.Audio
 
             if (deviceName != DefaultAudioOutput)
             {
-                Logger.PrintWarning(LogClass.Audio, "Invalid device name!");
+                Logger.Warning?.Print(LogClass.Audio, "Invalid device name!");
 
                 return ResultCode.DeviceNotFound;
             }
@@ -109,11 +94,11 @@ namespace Ryujinx.HLE.HOS.Services.Audio
 
             if ((ulong)deviceNameBuffer.Length <= (ulong)receiveSize)
             {
-                context.Memory.WriteBytes(receivePosition, deviceNameBuffer);
+                context.Memory.Write((ulong)receivePosition, deviceNameBuffer);
             }
             else
             {
-                Logger.PrintError(LogClass.ServiceAudio, $"Output buffer size {receiveSize} too small!");
+                Logger.Error?.Print(LogClass.ServiceAudio, $"Output buffer size {receiveSize} too small!");
             }
 
             int sampleRate = context.RequestData.ReadInt32();
@@ -126,7 +111,7 @@ namespace Ryujinx.HLE.HOS.Services.Audio
 
             if (sampleRate != DefaultSampleRate)
             {
-                Logger.PrintWarning(LogClass.Audio, "Invalid sample rate!");
+                Logger.Warning?.Print(LogClass.Audio, "Invalid sample rate!");
 
                 return ResultCode.UnsupportedSampleRate;
             }
@@ -138,7 +123,7 @@ namespace Ryujinx.HLE.HOS.Services.Audio
                 channels = DefaultChannelsCount;
             }
 
-            KEvent releaseEvent = new KEvent(context.Device.System);
+            KEvent releaseEvent = new KEvent(context.Device.System.KernelContext);
 
             ReleaseCallback callback = () =>
             {
@@ -149,7 +134,7 @@ namespace Ryujinx.HLE.HOS.Services.Audio
 
             int track = audioOut.OpenTrack(sampleRate, channels, callback);
 
-            MakeObject(context, new IAudioOut(audioOut, releaseEvent, track));
+            MakeObject(context, new IAudioOut(context.Device.System.KernelContext, audioOut, releaseEvent, track, context.Request.HandleDesc.ToCopy[0]));
 
             context.ResponseData.Write(sampleRate);
             context.ResponseData.Write(channels);

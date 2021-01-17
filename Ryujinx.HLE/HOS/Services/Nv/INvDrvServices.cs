@@ -1,10 +1,9 @@
-using ARMeilleure.Memory;
 using Ryujinx.Common;
 using Ryujinx.Common.Logging;
+using Ryujinx.Cpu;
 using Ryujinx.HLE.Exceptions;
 using Ryujinx.HLE.HOS.Ipc;
 using Ryujinx.HLE.HOS.Kernel.Memory;
-using Ryujinx.HLE.HOS.Kernel.Process;
 using Ryujinx.HLE.HOS.Services.Nv.NvDrvServices;
 using Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu;
 using Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel;
@@ -12,6 +11,7 @@ using Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl;
 using Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrlGpu;
 using Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvMap;
 using Ryujinx.HLE.HOS.Services.Nv.Types;
+using Ryujinx.Memory;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -27,43 +27,45 @@ namespace Ryujinx.HLE.HOS.Services.Nv
         private static Dictionary<string, Type> _deviceFileRegistry =
                    new Dictionary<string, Type>()
         {
-                       { "/dev/nvmap",           typeof(NvMapDeviceFile)         },
-                       { "/dev/nvhost-ctrl",     typeof(NvHostCtrlDeviceFile)    },
-                       { "/dev/nvhost-ctrl-gpu", typeof(NvHostCtrlGpuDeviceFile) },
-                       { "/dev/nvhost-as-gpu",   typeof(NvHostAsGpuDeviceFile)   },
-                       { "/dev/nvhost-gpu",      typeof(NvHostGpuDeviceFile)     },
-                     //{ "/dev/nvhost-msenc",    typeof(NvHostChannelDeviceFile) },
-                       { "/dev/nvhost-nvdec",    typeof(NvHostChannelDeviceFile) },
-                     //{ "/dev/nvhost-nvjpg",    typeof(NvHostChannelDeviceFile) },
-                       { "/dev/nvhost-vic",      typeof(NvHostChannelDeviceFile) },
-                     //{ "/dev/nvhost-display",  typeof(NvHostChannelDeviceFile) },
+            { "/dev/nvmap",           typeof(NvMapDeviceFile)         },
+            { "/dev/nvhost-ctrl",     typeof(NvHostCtrlDeviceFile)    },
+            { "/dev/nvhost-ctrl-gpu", typeof(NvHostCtrlGpuDeviceFile) },
+            { "/dev/nvhost-as-gpu",   typeof(NvHostAsGpuDeviceFile)   },
+            { "/dev/nvhost-gpu",      typeof(NvHostGpuDeviceFile)     },
+            //{ "/dev/nvhost-msenc",    typeof(NvHostChannelDeviceFile) },
+            { "/dev/nvhost-nvdec",    typeof(NvHostChannelDeviceFile) },
+            //{ "/dev/nvhost-nvjpg",    typeof(NvHostChannelDeviceFile) },
+            { "/dev/nvhost-vic",      typeof(NvHostChannelDeviceFile) },
+            //{ "/dev/nvhost-display",  typeof(NvHostChannelDeviceFile) },
         };
 
         private static IdDictionary _deviceFileIdRegistry = new IdDictionary();
 
-        private KProcess _owner;
+        private IVirtualMemoryManager _clientMemory;
+        private long _owner;
 
-        public INvDrvServices(ServiceCtx context)
+        private bool _transferMemInitialized = false;
+
+        public INvDrvServices(ServiceCtx context) : base(context.Device.System.NvDrvServer)
         {
-            _owner = null;
+            _owner = 0;
         }
 
         private int Open(ServiceCtx context, string path)
         {
-            if (context.Process == _owner)
+            if (_deviceFileRegistry.TryGetValue(path, out Type deviceFileClass))
             {
-                if (_deviceFileRegistry.TryGetValue(path, out Type deviceFileClass))
-                {
-                    ConstructorInfo constructor = deviceFileClass.GetConstructor(new Type[] { typeof(ServiceCtx) });
+                ConstructorInfo constructor = deviceFileClass.GetConstructor(new Type[] { typeof(ServiceCtx), typeof(IVirtualMemoryManager), typeof(long) });
 
-                    NvDeviceFile deviceFile = (NvDeviceFile)constructor.Invoke(new object[] { context });
+                NvDeviceFile deviceFile = (NvDeviceFile)constructor.Invoke(new object[] { context, _clientMemory, _owner });
 
-                    return _deviceFileIdRegistry.Add(deviceFile);
-                }
-                else
-                {
-                    Logger.PrintWarning(LogClass.ServiceNv, $"Cannot find file device \"{path}\"!");
-                }
+                deviceFile.Path = path;
+
+                return _deviceFileIdRegistry.Add(deviceFile);
+            }
+            else
+            {
+                Logger.Warning?.Print(LogClass.ServiceNv, $"Cannot find file device \"{path}\"!");
             }
 
             return -1;
@@ -84,7 +86,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
             {
                 arguments = null;
 
-                Logger.PrintWarning(LogClass.ServiceNv, "Ioctl size inconsistency found!");
+                Logger.Warning?.Print(LogClass.ServiceNv, "Ioctl size inconsistency found!");
 
                 return NvResult.InvalidSize;
             }
@@ -95,14 +97,16 @@ namespace Ryujinx.HLE.HOS.Services.Nv
                 {
                     arguments = null;
 
-                    Logger.PrintWarning(LogClass.ServiceNv, "Ioctl size inconsistency found!");
+                    Logger.Warning?.Print(LogClass.ServiceNv, "Ioctl size inconsistency found!");
 
                     return NvResult.InvalidSize;
                 }
 
                 byte[] outputData = new byte[outputDataSize];
 
-                byte[] temp = context.Memory.ReadBytes(inputDataPosition, inputDataSize);
+                byte[] temp = new byte[inputDataSize];
+
+                context.Memory.Read((ulong)inputDataPosition, temp);
 
                 Buffer.BlockCopy(temp, 0, outputData, 0, temp.Length);
 
@@ -116,7 +120,11 @@ namespace Ryujinx.HLE.HOS.Services.Nv
             }
             else
             {
-                arguments = new Span<byte>(context.Memory.ReadBytes(inputDataPosition, inputDataSize));
+                byte[] temp = new byte[inputDataSize];
+
+                context.Memory.Read((ulong)inputDataPosition, temp);
+
+                arguments = new Span<byte>(temp);
             }
 
             return NvResult.Success;
@@ -135,12 +143,12 @@ namespace Ryujinx.HLE.HOS.Services.Nv
 
             if (deviceFile == null)
             {
-                Logger.PrintWarning(LogClass.ServiceNv, $"Invalid file descriptor {fd}");
+                Logger.Warning?.Print(LogClass.ServiceNv, $"Invalid file descriptor {fd}");
 
                 return NvResult.NotImplemented;
             }
 
-            if (deviceFile.Owner.Pid != _owner.Pid)
+            if (deviceFile.Owner != _owner)
             {
                 return NvResult.AccessDenied;
             }
@@ -150,9 +158,9 @@ namespace Ryujinx.HLE.HOS.Services.Nv
 
         private NvResult EnsureInitialized()
         {
-            if (_owner == null)
+            if (_owner == 0)
             {
-                Logger.PrintWarning(LogClass.ServiceNv, "INvDrvServices is not initialized!");
+                Logger.Warning?.Print(LogClass.ServiceNv, "INvDrvServices is not initialized!");
 
                 return NvResult.NotInitialized;
             }
@@ -219,8 +227,9 @@ namespace Ryujinx.HLE.HOS.Services.Nv
             if (errorCode == NvResult.Success)
             {
                 long pathPtr = context.Request.SendBuff[0].Position;
+                long pathSize = context.Request.SendBuff[0].Size;
 
-                string path = MemoryHelper.ReadAsciiString(context.Memory, pathPtr);
+                string path = MemoryHelper.ReadAsciiString(context.Memory, pathPtr, pathSize);
 
                 fd = Open(context, path);
 
@@ -266,7 +275,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
 
                         if ((ioctlCommand.DirectionValue & NvIoctl.Direction.Write) != 0)
                         {
-                            context.Memory.WriteBytes(context.Request.GetBufferType0x22(0).Position, arguments.ToArray());
+                            context.Memory.Write((ulong)context.Request.GetBufferType0x22(0).Position, arguments.ToArray());
                         }
                     }
                 }
@@ -309,9 +318,19 @@ namespace Ryujinx.HLE.HOS.Services.Nv
             long transferMemSize   = context.RequestData.ReadInt64();
             int  transferMemHandle = context.Request.HandleDesc.ToCopy[0];
 
-            _owner = context.Process;
+            // TODO: When transfer memory will be implemented, this could be removed.
+            _transferMemInitialized = true;
+
+            int clientHandle = context.Request.HandleDesc.ToCopy[0];
+
+            _clientMemory = context.Process.HandleTable.GetKProcess(clientHandle).CpuMemory;
+
+            context.Device.System.KernelContext.Syscall.GetProcessId(clientHandle, out _owner);
 
             context.ResponseData.Write((uint)NvResult.Success);
+
+            // Close transfer memory immediately as we don't use it.
+            context.Device.System.KernelContext.Syscall.CloseHandle(transferMemHandle);
 
             return ResultCode.Success;
         }
@@ -368,9 +387,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
 
                 if (errorCode == NvResult.Success)
                 {
-                    KSharedMemory sharedMemory = context.Process.HandleTable.GetObject<KSharedMemory>(sharedMemoryHandle);
-
-                    errorCode = ConvertInternalErrorCode(deviceFile.MapSharedMemory(sharedMemory, argument));
+                    errorCode = ConvertInternalErrorCode(deviceFile.MapSharedMemory(sharedMemoryHandle, argument));
                 }
             }
 
@@ -383,14 +400,36 @@ namespace Ryujinx.HLE.HOS.Services.Nv
         // GetStatus() -> (unknown<0x20>, u32 error_code)
         public ResultCode GetStatus(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            // TODO: When transfer memory will be implemented, check if it's mapped instead.
+            if (_transferMemInitialized)
+            {
+                // TODO: Populate values when more RE will be done.
+                NvStatus nvStatus = new NvStatus
+                {
+                    MemoryValue1 = 0, // GetMemStats(transfer_memory + 0x60, 3)
+                    MemoryValue2 = 0, // GetMemStats(transfer_memory + 0x60, 5)
+                    MemoryValue3 = 0, // transfer_memory + 0x78
+                    MemoryValue4 = 0  // transfer_memory + 0x80
+                };
+
+                context.ResponseData.WriteStruct(nvStatus);
+                context.ResponseData.Write((uint)NvResult.Success);
+
+                Logger.Stub?.PrintStub(LogClass.ServiceNv);
+            }
+            else
+            {
+                context.ResponseData.Write((uint)NvResult.NotInitialized);
+            }
+
+            return ResultCode.Success;
         }
 
         [Command(7)]
         // ForceSetClientPid(u64) -> u32 error_code
         public ResultCode ForceSetClientPid(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(8)]
@@ -408,7 +447,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
         // DumpGraphicsMemoryInfo()
         public ResultCode DumpGraphicsMemoryInfo(ServiceCtx context)
         {
-            Logger.PrintStub(LogClass.ServiceNv);
+            Logger.Stub?.PrintStub(LogClass.ServiceNv);
 
             return ResultCode.Success;
         }
@@ -417,7 +456,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
         // InitializeDevtools(u32, handle<copy>) -> u32 error_code;
         public ResultCode InitializeDevtools(ServiceCtx context)
         {
-            throw new ServiceNotImplementedException(context);
+            throw new ServiceNotImplementedException(this, context);
         }
 
         [Command(11)] // 3.0.0+
@@ -435,7 +474,11 @@ namespace Ryujinx.HLE.HOS.Services.Nv
 
                 errorCode = GetIoctlArgument(context, ioctlCommand, out Span<byte> arguments);
 
-                Span<byte> inlineInBuffer = new Span<byte>(context.Memory.ReadBytes(inlineInBufferPosition, inlineInBufferSize));
+                byte[] temp = new byte[inlineInBufferSize];
+
+                context.Memory.Read((ulong)inlineInBufferPosition, temp);
+
+                Span<byte> inlineInBuffer = new Span<byte>(temp);
 
                 if (errorCode == NvResult.Success)
                 {
@@ -454,7 +497,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
 
                         if ((ioctlCommand.DirectionValue & NvIoctl.Direction.Write) != 0)
                         {
-                            context.Memory.WriteBytes(context.Request.GetBufferType0x22(0).Position, arguments.ToArray());
+                            context.Memory.Write((ulong)context.Request.GetBufferType0x22(0).Position, arguments.ToArray());
                         }
                     }
                 }
@@ -480,7 +523,11 @@ namespace Ryujinx.HLE.HOS.Services.Nv
 
                 errorCode = GetIoctlArgument(context, ioctlCommand, out Span<byte> arguments);
 
-                Span<byte> inlineOutBuffer = new Span<byte>(context.Memory.ReadBytes(inlineOutBufferPosition, inlineOutBufferSize));
+                byte[] temp = new byte[inlineOutBufferSize];
+
+                context.Memory.Read((ulong)inlineOutBufferPosition, temp);
+
+                Span<byte> inlineOutBuffer = new Span<byte>(temp);
 
                 if (errorCode == NvResult.Success)
                 {
@@ -499,8 +546,8 @@ namespace Ryujinx.HLE.HOS.Services.Nv
 
                         if ((ioctlCommand.DirectionValue & NvIoctl.Direction.Write) != 0)
                         {
-                            context.Memory.WriteBytes(context.Request.GetBufferType0x22(0).Position, arguments.ToArray());
-                            context.Memory.WriteBytes(inlineOutBufferPosition, inlineOutBuffer.ToArray());
+                            context.Memory.Write((ulong)context.Request.GetBufferType0x22(0).Position, arguments.ToArray());
+                            context.Memory.Write((ulong)inlineOutBufferPosition, inlineOutBuffer.ToArray());
                         }
                     }
                 }
@@ -515,7 +562,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
         // FinishInitialize(unknown<8>)
         public ResultCode FinishInitialize(ServiceCtx context)
         {
-            Logger.PrintStub(LogClass.ServiceNv);
+            Logger.Stub?.PrintStub(LogClass.ServiceNv);
 
             return ResultCode.Success;
         }
